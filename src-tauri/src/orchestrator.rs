@@ -28,6 +28,7 @@ pub struct PlaybackData {
     pub video_id: String,
     pub stream_url: String,
     pub itag: i64,
+    pub mime_type: String,
     /// HTTP headers mpv must send (User-Agent; Phase 3 adds Cookie).
     #[serde(skip)]
     pub headers: std::collections::HashMap<String, String>,
@@ -536,6 +537,7 @@ impl Orchestrator {
                 video_id: video_id.to_owned(),
                 stream_url: c.url,
                 itag: c.itag as i64,
+                mime_type: if c.itag == 140 { "audio/mp4".into() } else { "audio/webm; codecs=\"opus\"".into() },
                 headers: std::collections::HashMap::new(),
                 expires_in_seconds: c.expires_in_seconds as i64,
                 loudness_db: c.loudness_db.map(|f| f as f64),
@@ -800,6 +802,7 @@ impl Orchestrator {
             video_id: video_id.to_owned(),
             stream_url: url,
             itag: format.itag as i64,
+            mime_type: format.mime_type.clone(),
             headers,
             expires_in_seconds: expires,
             loudness_db: format.loudness_db.or(loudness),

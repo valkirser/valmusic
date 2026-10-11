@@ -2,16 +2,16 @@
 //
 // YouTube sorts a playlist itself, and remembers the choice, so wherever it offers a sort menu the
 // page asks it for an ordered list instead of ordering one here (see `PlaylistPage.sortMenu`). The
-// list then reads the same way in Limusic, in YouTube Music, and in any other client on the
+// list then reads the same way in ValMusic, in YouTube Music, and in any other client on the
 // account. `sortSongs` below is the fallback for the two things YouTube cannot do — rank by our own
 // play counts, and reverse a playlist's stored order — plus lists it offers no menu for at all.
 import type { ServerSort, SongItem } from './api';
 
-export type SortKey = ServerSort | 'plays';
+export type SortKey = ServerSort | 'plays' | 'custom';
 
 /** `top` is YouTube's "Top voted": a list can already be in it, so the key has to round-trip, but
  *  it is deliberately not offered here — there is no way to compute it for a list we sort locally. */
-export const SORTS: SortKey[] = ['default', 'newest', 'oldest', 'title', 'artist', 'album', 'plays'];
+export const SORTS: SortKey[] = ['default', 'custom', 'newest', 'oldest', 'title', 'artist', 'album', 'plays'];
 
 /**
  * The nearest order YouTube can store for this choice, or `null` when it has none at all.
@@ -20,10 +20,10 @@ export const SORTS: SortKey[] = ['default', 'newest', 'oldest', 'title', 'artist
  * descending Title/Artist/Album (`playlistDynamicSortPreference` takes 1..3 and nothing else) and
  * no reversed manual order, so a reversed sort stores the ascending one and keeps the reverse to
  * itself: YouTube Music then shows the same sort the right way up, which beats leaving it on an
- * unrelated order. Only "Most played" maps to nothing.
+ * unrelated order. "Most played" and "Custom order" map to no server sort.
  */
 export function persistedSort(sort: SortKey, desc: boolean): ServerSort | null {
-	if (sort === 'plays') return null;
+	if (sort === 'plays' || sort === 'custom') return null;
 	if (sort === 'newest' || sort === 'oldest')
 		return (sort === 'newest') !== desc ? 'newest' : 'oldest';
 	return sort;
@@ -35,13 +35,14 @@ export function persistedSort(sort: SortKey, desc: boolean): ServerSort | null {
  * date sort, so those count; every other reverse, and "Most played", do not.
  */
 export const storedExactly = (sort: SortKey, desc: boolean): boolean =>
-	sort !== 'plays' && (!desc || sort === 'newest' || sort === 'oldest');
+	sort !== 'plays' && sort !== 'custom' && (!desc || sort === 'newest' || sort === 'oldest');
 
 /**
  * What to ask YouTube for when the page wants `sort`. "Most played" has no server equivalent, so
  * it ranks the playlist's own order rather than whatever order the account happens to be on.
  */
-export const fetchSort = (sort: SortKey): ServerSort => (sort === 'plays' ? 'default' : sort);
+export const fetchSort = (sort: SortKey): ServerSort =>
+	sort === 'plays' || sort === 'custom' ? 'default' : sort;
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
@@ -70,7 +71,7 @@ export function sortSongs(
 	if (items.length < 2) return items;
 	// "Top voted" is YouTube's ranking and there is nothing local to recompute it from, so off the
 	// server it behaves like Default rather than quietly ordering by something else.
-	if (sort === 'default' || sort === 'top') return desc ? items.slice().reverse() : items;
+	if (sort === 'default' || sort === 'top' || sort === 'custom') return desc ? items.slice().reverse() : items;
 	if (sort === 'newest' || sort === 'oldest')
 		return ((sort === 'newest') !== desc) === baseNewestFirst ? items : items.slice().reverse();
 	const dir = desc ? -1 : 1;

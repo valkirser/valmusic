@@ -34,6 +34,7 @@
 
 	let title = $state('');
 	let creating = $state(false);
+	let addProgress = $state<{ done: number; total: number; current: string } | null>(null);
 
 	const signedIn = $derived(!!auth.account?.signedIn);
 	const songs = $derived(ui.newPlaylist?.songs ?? []);
@@ -43,23 +44,31 @@
 
 	// A fresh name each time it opens, so a cancelled one isn't waiting in the box next time.
 	$effect(() => {
-		if (ui.newPlaylist) title = '';
+		if (ui.newPlaylist) {
+			title = '';
+			addProgress = null;
+		}
 	});
 
 	const close = () => (ui.newPlaylist = null);
 
 	async function create() {
 		const name = title.trim();
-		if (!name || creating) return;
+		if (!name || creating || ui.addPending) return;
 		creating = true;
 		// Taken now: closing the dialog below clears `ui.newPlaylist`, and the songs with it.
 		const batch = songs;
 		try {
 			const item = await createLibraryPlaylist(name, local);
+			if (batch.length) {
+				addProgress = { done: 0, total: batch.length, current: batch[0]?.title ?? '' };
+				await addSongsToPlaylist(item, batch, (done, total, current) => {
+					addProgress = { done, total, current };
+				});
+			} else {
+				toast.success(t('toasts.playlist_created', { title: name }));
+			}
 			close();
-			// Adding says what happened on its own ("Added to …"), which covers the creation too.
-			if (batch.length) await addSongsToPlaylist(item, batch);
-			else toast.success(t('toasts.playlist_created', { title: name }));
 		} catch (e) {
 			toast.error(String(e));
 		} finally {
@@ -82,7 +91,7 @@
 	] as const;
 </script>
 
-<Dialog.Root open={!!ui.newPlaylist} onOpenChange={(v) => !v && close()}>
+<Dialog.Root open={!!ui.newPlaylist} onOpenChange={(v) => !v && !creating && close()}>
 	<Dialog.Content class="sm:max-w-md">
 		<Dialog.Header>
 			<Dialog.Title>{t('dialogs.edit_playlist.new_title')}</Dialog.Title>
@@ -100,6 +109,7 @@
 				placeholder={t('dialogs.edit_playlist.name_placeholder')}
 				aria-label={t('dialogs.edit_playlist.name_label')}
 				autofocus
+				disabled={creating}
 			/>
 			{#if signedIn}
 				<RadioGroup.Root
@@ -133,9 +143,18 @@
 					{t('dialogs.new_playlist.device_only')}
 				</p>
 			{/if}
+			{#if addProgress}
+				<div class="space-y-2" aria-live="polite">
+					<div class="flex items-center justify-between gap-3 text-sm">
+						<span class="truncate">{t('dialogs.new_playlist.adding', { title: addProgress.current })}</span>
+						<span class="shrink-0 tabular-nums">{addProgress.done}/{addProgress.total}</span>
+					</div>
+					<progress class="h-2 w-full accent-primary" max={addProgress.total} value={addProgress.done}></progress>
+				</div>
+			{/if}
 			<Dialog.Footer>
-				<Button type="button" variant="outline" onclick={close}>{t('common.cancel')}</Button>
-				<Button type="submit" disabled={creating || !title.trim()}>
+				<Button type="button" variant="outline" onclick={close} disabled={creating}>{t('common.cancel')}</Button>
+				<Button type="submit" disabled={creating || ui.addPending || !title.trim()}>
 					{creating ? t('common.loading') : t('common.create')}
 				</Button>
 			</Dialog.Footer>

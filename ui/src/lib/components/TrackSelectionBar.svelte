@@ -14,6 +14,7 @@
 	import type { SongItem } from '$lib/api';
 	import { t } from '$lib/i18n.svelte';
 	import type { TrackSelection } from '$lib/selection.svelte';
+	import DownloadDialog from './DownloadDialog.svelte';
 
 	// `onRemove` is only given where the list is one the user can edit (a playlist page they own);
 	// everywhere else there is nothing to remove from and the button is absent.
@@ -27,6 +28,19 @@
 		onRemove?: (songs: SongItem[]) => Promise<void>;
 	} = $props();
 	let busy = $state(false);
+	let downloadOpen = $state(false);
+	let downloadMounted = $state(false);
+	let downloadCloseTimer: ReturnType<typeof setTimeout> | undefined;
+	function showDownloadDialog() {
+		if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+		downloadMounted = true;
+		downloadOpen = true;
+	}
+	function finishDownloadDialogClose() {
+		downloadOpen = false;
+		if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+		downloadCloseTimer = setTimeout(() => (downloadMounted = false), 180);
+	}
 	// Second click confirms: a bulk removal is not undoable, and the button sits next to Clear.
 	let confirmRemove = $state(false);
 	// Any change to what is selected drops a half-made confirmation, so the destructive button
@@ -109,6 +123,8 @@
 						<HugeiconsIcon icon={PlayListAddIcon} class="h-4 w-4" />
 					</Button>
 				{/if}
+				<Button variant="ghost" size="sm" disabled={blocked} onkeydown={onKey}
+					onclick={showDownloadDialog}>↓ {t('selection.download')}</Button>
 				{#if onRemove}
 					{#if confirmRemove}
 						<Button variant="destructive" size="sm" disabled={blocked} onkeydown={onKey}
@@ -155,3 +171,5 @@
 		{/if}
 	</div>
 {/if}
+
+{#if downloadMounted}<DownloadDialog bind:open={downloadOpen} onClose={finishDownloadDialogClose} songs={[...selection.songs]} archive playlistName={from} />{/if}

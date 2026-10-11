@@ -315,7 +315,7 @@ mod tests {
 /// invoked explicitly). Prints the pot so it can be HEAD-tested with
 /// `progress/active/webremix-403-harness/pot_head_test.py`.
 ///
-///   cargo test -p limusic-app botguard_mints_an_accepted_token -- --ignored --nocapture
+///   cargo test -p valmusic-app botguard_mints_an_accepted_token -- --ignored --nocapture
 #[cfg(test)]
 mod live {
     use super::*;
@@ -360,7 +360,7 @@ mod live {
     /// the next `/player` call has to mint another one off that live runtime. Lives here rather
     /// than beside `PoTokenGenerator` because only a real runtime proves it.
     ///
-    ///   cargo test -p limusic-app session_token_is_reminted -- --ignored --nocapture
+    ///   cargo test -p valmusic-app session_token_is_reminted -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "hits live YouTube"]
     async fn session_token_is_reminted_after_invalidation() {

@@ -3361,8 +3361,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "limusic-app"
-version = "1.2.0"
+name = "valmusic-app"
+version = "1.0.0"
 dependencies = [
  "any_ascii",
  "anyhow",

@@ -132,7 +132,7 @@
 	<span
 		class="pointer-events-none absolute inset-x-0 text-center text-xs font-medium tracking-wide text-muted-foreground"
 	>
-		Limusic
+		ValMusic
 	</span>
 
 	<!-- macOS overlay style floats the traffic lights over the top-left of the webview, so the row

@@ -475,12 +475,6 @@ export const releaseNotes = () => invoke<ReleaseNote[]>('release_notes');
 /** False on Linux builds that aren't the AppImage (.rpm, the AUR package): they update through the
  *  package manager, so the UI offers a download link instead of an install button. */
 export const canSelfUpdate = () => invoke<boolean>('can_self_update');
-/** The updater plugin's `check()` against the beta channel's manifest, as the metadata the
- *  plugin's `Update` class is built from. `null` when this build is what the channel offers. */
-export const checkBetaUpdate = () =>
-	invoke<ConstructorParameters<typeof import('@tauri-apps/plugin-updater').Update>[0] | null>(
-		'check_beta_update'
-	);
 /** Open an http(s) link in the real browser, never in the webview itself. */
 export const openExternal = (url: string) => invoke<void>('open_external', { url });
 /** Real quit (not close-to-tray). Same path as the tray's Quit item. */
@@ -594,8 +588,8 @@ export const getPlaylist = (id: string, sort?: ServerSort, desc?: boolean) =>
  */
 export const setPlaylistSort = (playlistId: string, sort: ServerSort) =>
 	invoke<void>('set_playlist_sort', { playlistId, sort });
-export const getPlaylistMore = (token: string) =>
-	invoke<PlaylistContinuation>('get_playlist_more', { token });
+export const getPlaylistMore = (token: string, playlistId?: string) =>
+	invoke<PlaylistContinuation>('get_playlist_more', { token, playlistId });
 /**
  * videoId → the ids of the playlists you own that hold it. Read straight from local SQLite, so it
  * answers instantly and is empty until `syncPlaylistIndex` has filled it in at least once.
@@ -710,6 +704,13 @@ export const editPlaylistDetails = (
  *  worth waiting for: YouTube's own thumbnail is the cover being removed until it lands). */
 export const setPlaylistCover = (playlistId: string, path: string | null) =>
 	invoke<{ cover?: string; thumbnail?: string }>('set_playlist_cover', { playlistId, path });
+/** Store local display overrides for a song; blank fields clear that override. */
+export const setSongMetadata = (playlistId: string, videoId: string, title: string, artists: string, thumbnail: string, artistRuns: ArtistRun[]) =>
+	invoke<void>('set_song_metadata', { playlistId, videoId, title, artists, thumbnail, artistRuns });
+export interface DownloadProgress { done: number; total: number; current: string; progress: number }
+export interface SongMetadataUpdate { playlistId: string; videoId: string; title: string; artists: string; thumbnail: string; artistId?: string | null; artistRuns: ArtistRun[] }
+export const downloadSongs = (items: SongItem[], folder: string, format: string, playlistName?: string, archive = false) =>
+	invoke<string>('download_songs', { items, folder, format, playlistName, archive });
 export const deletePlaylist = (playlistId: string) =>
 	invoke<void>('delete_playlist', { playlistId });
 export const subscribe = (channelId: string, subscribed: boolean) =>
@@ -817,6 +818,8 @@ export const importResolve = (link: string) => invoke<ImportResolved>('import_re
 // --- events (context/11). Each returns an unlisten fn; call it on component teardown. --------
 export const onNowPlaying = (cb: (n: NowPlaying) => void): Promise<UnlistenFn> =>
 	listen<NowPlaying>('now-playing', (e) => cb(e.payload));
+export const onNowPlayingMetadataUpdated = (cb: (n: NowPlaying) => void): Promise<UnlistenFn> =>
+	listen<NowPlaying>('now-playing-metadata-updated', (e) => cb(e.payload));
 /**
  * The backend asked YouTube what a track's rating really is and got a different answer than the
  * row we were handed (issue #93). Fires only on a change, at most once per track start.
@@ -825,6 +828,10 @@ export const onRating = (cb: (videoId: string, rating: Rating) => void): Promise
 	listen<{ videoId: string; rating: Rating }>('rating', (e) =>
 		cb(e.payload.videoId, e.payload.rating)
 	);
+export const onDownloadProgress = (cb: (progress: DownloadProgress) => void): Promise<UnlistenFn> =>
+	listen<DownloadProgress>('download-progress', (e) => cb(e.payload));
+export const onSongMetadataUpdated = (cb: (update: SongMetadataUpdate) => void): Promise<UnlistenFn> =>
+	listen<SongMetadataUpdate>('song-metadata-updated', (e) => cb(e.payload));
 /** Linux and Windows: mpv has this track's music video (or will as soon as the track starts). */
 export const onVideoReady = (cb: (videoId: string) => void): Promise<UnlistenFn> =>
 	listen<string>('video-ready', (e) => cb(e.payload));
@@ -865,7 +872,7 @@ export const onQueueAppended = (cb: (q: QueueAppended) => void): Promise<Unliste
 /** Main window shown/hidden (close-to-tray, the mini player). WebKitGTK never tells the page. */
 export const onUiVisible = (cb: (v: boolean) => void): Promise<UnlistenFn> =>
 	listen<boolean>('ui-visible', (e) => cb(e.payload));
-/** `limusic-app <link>` (#348): the arguments a cold launch was given, handed over once... */
+/** `valmusic-app <link>` (#348): the arguments a cold launch was given, handed over once... */
 export const takeLaunchArgs = () => invoke<string[]>('take_launch_args');
 /** ...and those of a second launch while this one runs. */
 export const onOpenLink = (cb: (args: string[]) => void): Promise<UnlistenFn> =>

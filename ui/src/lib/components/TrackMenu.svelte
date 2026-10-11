@@ -28,7 +28,7 @@
 		PencilEdit02Icon
 	} from '@hugeicons/core-free-icons';
 	import * as api from '$lib/api';
-	import type { SongItem } from '$lib/api';
+	import type { BrowseItem, SongItem } from '$lib/api';
 	import { anchorMenu, ctxHost, fitMenu, NO_ANCHOR, toBody } from '$lib/menu';
 	import { removableFromPlaylist } from '$lib/queue';
 	import {
@@ -58,6 +58,8 @@
 	import { t } from '$lib/i18n.svelte';
 	import { invalidateCachedPrefix } from '$lib/pagecache';
 	import TempoPitchDialog from './TempoPitchDialog.svelte';
+	import DownloadDialog from './DownloadDialog.svelte';
+	import * as Dialog from './ui/dialog';
 
 	let {
 		song,
@@ -66,6 +68,7 @@
 		onRemove,
 		removeLabel = t('player.remove_from_playlist'),
 		playlistId,
+		metadataPlaylistId,
 		queueIndex,
 		linksOnly = false,
 		inLibraryList = false
@@ -85,6 +88,8 @@
 		 * playlist, and `onRemove` is already that.
 		 */
 		playlistId?: string | null;
+		/** Playlist whose row is being edited; overrides remain local to this list. */
+		metadataPlaylistId?: string | null;
 		/** This row's index in the backend queue, where the row *is* a queue row (the queue panel,
 		    the player bar). Lets the playlist removal take the row out of the queue that came from
 		    that playlist, rather than leaving a song the playlist no longer has queued up. */
@@ -104,6 +109,20 @@
 	const isPick = $derived(personal.picks.some((p) => p.id === song.video_id));
 
 	let menuOpen = $state(false);
+	let detailsOpen = $state(false);
+	let detailsMounted = $state(false);
+	let detailsCloseTimer: ReturnType<typeof setTimeout> | undefined;
+	let detailsTitle = $state('');
+	let artistQuery = $state('');
+	let artistMatches = $state<BrowseItem[]>([]);
+	let selectedArtists = $state<BrowseItem[]>([]);
+	let artistSearchTimer: ReturnType<typeof setTimeout> | undefined;
+	let artistSearchEpoch = 0;
+	let detailsCover = $state('');
+	let detailsBusy = $state(false);
+	let downloadOpen = $state(false);
+	let downloadMounted = $state(false);
+	let downloadCloseTimer: ReturnType<typeof setTimeout> | undefined;
 	// Player-bar only: tempo/pitch belong to playback, not to a row you happen to be pointing at.
 	let advancedOpen = $state(false);
 	let anchor = $state(NO_ANCHOR);
@@ -130,6 +149,115 @@
 		e.preventDefault();
 		e.stopPropagation();
 		menuOpen = false;
+	}
+	function editSongDetails() {
+		artistSearchEpoch++;
+		if (artistSearchTimer) clearTimeout(artistSearchTimer);
+		detailsTitle = song.title;
+		const linkedArtists = song.artist_runs?.filter((run) => run.id).map((run) => ({
+			kind: 'artist' as const, id: run.id!, title: run.text
+		})) ?? [];
+		selectedArtists = linkedArtists.length
+			? linkedArtists
+			: song.artists.split(',').map((name, index) => ({
+					kind: 'artist' as const,
+					id: index === 0 ? song.artist_id ?? '' : '',
+					title: name.trim()
+				})).filter((artist) => artist.title);
+		artistQuery = '';
+		artistMatches = [];
+		detailsCover = song.thumbnail ?? '';
+		if (detailsCloseTimer) clearTimeout(detailsCloseTimer);
+		detailsMounted = true;
+		detailsOpen = true;
+	}
+	function closeSongDetails() {
+		detailsOpen = false;
+		if (detailsCloseTimer) clearTimeout(detailsCloseTimer);
+		detailsCloseTimer = setTimeout(() => (detailsMounted = false), 180);
+	}
+	function handleDetailsOpenChange(value: boolean) {
+		if (value) {
+			if (detailsCloseTimer) clearTimeout(detailsCloseTimer);
+			detailsMounted = true;
+			detailsOpen = true;
+		} else {
+			closeSongDetails();
+		}
+	}
+	function showDownloadDialog() {
+		if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+		downloadMounted = true;
+		downloadOpen = true;
+	}
+	function finishDownloadDialogClose() {
+		downloadOpen = false;
+		if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+		downloadCloseTimer = setTimeout(() => (downloadMounted = false), 180);
+	}
+	function searchArtists(value: string) {
+		artistQuery = value;
+		if (artistSearchTimer) clearTimeout(artistSearchTimer);
+		const epoch = ++artistSearchEpoch;
+		const query = value.trim();
+		if (query.length < 2) {
+			artistMatches = [];
+			return;
+		}
+		artistSearchTimer = setTimeout(async () => {
+			try {
+				const results = await api.searchCards(query, 'artists');
+				if (epoch === artistSearchEpoch) artistMatches = results.filter((result) => result.kind === 'artist');
+			} catch {
+				if (epoch === artistSearchEpoch) artistMatches = [];
+			}
+		}, 250);
+	}
+	function selectArtist(artist: BrowseItem) {
+		if (!selectedArtists.some((selected) => selected.id === artist.id))
+			selectedArtists = [...selectedArtists, artist];
+		artistQuery = '';
+		artistMatches = [];
+	}
+	function makePrimaryArtist(index: number) {
+		if (index === 0) return;
+		const primary = selectedArtists[index];
+		selectedArtists = [primary, ...selectedArtists.filter((_, i) => i !== index)];
+	}
+	function selectedArtistRuns() {
+		return selectedArtists.flatMap((artist, index) => [
+			...(index > 0 ? [{ text: ', ' }] : []),
+			{ text: artist.title, id: artist.id || undefined }
+		]);
+	}
+	async function saveSongDetails() {
+		detailsBusy = true;
+		try {
+			if (!metadataPlaylistId) return;
+			const artistRuns = selectedArtistRuns();
+			const artists = selectedArtists.map((artist) => artist.title).join(', ');
+			await api.setSongMetadata(
+				metadataPlaylistId,
+				song.video_id,
+				detailsTitle,
+				artists,
+				detailsCover,
+				artistRuns
+			);
+			// Keep this playlist row reactive immediately; the backend event separately updates
+			// copies already sitting in the playback queue.
+			song.title = detailsTitle;
+			song.artists = artists;
+			song.thumbnail = detailsCover || undefined;
+			song.artist_runs = artistRuns;
+			song.artist_id = selectedArtists.find((artist) => artist.id)?.id;
+			closeSongDetails();
+			toast.success(t('dialogs.song_details.saved'));
+		} catch (e) {
+			toast.error(String(e));
+		} finally {
+			detailsBusy = false;
+		}
 	}
 
 	const rated = $derived(ratingOf(song));
@@ -378,6 +506,20 @@
 				<HugeiconsIcon icon={Share08Icon} class="h-4 w-4" /> {t('player.share')}
 			</button>
 		{/if}
+		<button
+			class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+			onclick={(e) => run(e, showDownloadDialog)}
+		>
+			<span class="w-4 text-center" aria-hidden="true">↓</span> {t('player.download_song')}
+		</button>
+		{#if metadataPlaylistId}
+			<button
+				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+				onclick={(e) => run(e, editSongDetails)}
+			>
+				<HugeiconsIcon icon={PencilEdit02Icon} class="h-4 w-4" /> {t('player.edit_song_details')}
+			</button>
+		{/if}
 		<!-- #404: fix how this track scrobbles, for good. Opens the Scrobbling tab on it, where the
 		     preview shows what Last.fm gets before and after. Only for someone actually scrobbling:
 		     connected, and the tab's switch on. -->
@@ -431,6 +573,68 @@
 		{/if}
 	</div>
 {/if}
+
+
+{#if detailsMounted}
+<Dialog.Root open={detailsOpen} onOpenChange={handleDetailsOpenChange}>
+	<Dialog.Content showCloseButton={false} class="max-w-md gap-0 rounded-xl border bg-card p-5 text-card-foreground shadow-2xl">
+		<form
+			class="w-full space-y-4"
+			onsubmit={(e) => { e.preventDefault(); saveSongDetails(); }}
+		>
+			<div>
+				<Dialog.Title class="text-lg font-semibold">{t('dialogs.song_details.title')}</Dialog.Title>
+				<Dialog.Description class="text-sm">{t('dialogs.song_details.local_note')}</Dialog.Description>
+			</div>
+			<label class="block space-y-1 text-sm">
+				<span>{t('dialogs.song_details.name')}</span>
+				<input bind:value={detailsTitle} maxlength="500" class="w-full rounded-md border bg-background px-3 py-2" />
+			</label>
+			<div class="space-y-2 text-sm">
+				<span>{t('dialogs.song_details.artists')}</span>
+				<div class="flex flex-wrap gap-1.5">
+					{#each selectedArtists as artist, i (`${artist.id}:${i}`)}
+						<span class="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-1">
+							{artist.title}
+							{#if i === 0}
+								<span class="text-[10px] text-primary">{t('dialogs.song_details.primary_artist')}</span>
+							{:else}
+								<button type="button" class="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground" onclick={() => makePrimaryArtist(i)}>{t('dialogs.song_details.make_primary')}</button>
+							{/if}
+							<button type="button" class="cursor-pointer text-muted-foreground hover:text-foreground" aria-label={t('dialogs.song_details.remove_artist', { name: artist.title })} onclick={() => (selectedArtists = selectedArtists.filter((_, index) => index !== i))}>×</button>
+						</span>
+					{/each}
+				</div>
+				<input value={artistQuery} oninput={(e) => searchArtists(e.currentTarget.value)} placeholder={t('dialogs.song_details.search_artist')} autocomplete="off" spellcheck="false" class="w-full rounded-md border bg-background px-3 py-2" />
+				{#if artistQuery.trim().length >= 2 && artistMatches.length === 0}
+					<p class="text-xs text-muted-foreground">{t('dialogs.song_details.no_artist_results')}</p>
+				{/if}
+				{#if artistMatches.length}
+					<div class="max-h-40 overflow-y-auto rounded-md border bg-background">
+						{#each artistMatches as artist (artist.id)}
+							<button type="button" class="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left hover:bg-accent/10" onclick={() => selectArtist(artist)}>
+								{#if artist.thumbnail}<img src={artist.thumbnail} alt="" class="h-7 w-7 rounded-full object-cover" />{/if}
+								<span class="min-w-0 flex-1 truncate">{artist.title}</span>
+								{#if artist.subtitle}<span class="truncate text-xs text-muted-foreground">{artist.subtitle}</span>{/if}
+							</button>
+						{/each}
+					</div>
+				{/if}
+			</div>
+			<label class="block space-y-1 text-sm">
+				<span>{t('dialogs.song_details.cover_url')}</span>
+				<input bind:value={detailsCover} type="url" placeholder="https://example.com/cover.jpg" class="w-full rounded-md border bg-background px-3 py-2" />
+			</label>
+			<div class="flex justify-end gap-2">
+				<button type="button" class="cursor-pointer rounded-md px-3 py-2 text-sm hover:bg-accent" onclick={closeSongDetails}>Cancel</button>
+				<button type="submit" disabled={detailsBusy} class="cursor-pointer rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-50">{detailsBusy ? t('dialogs.song_details.saving') : t('dialogs.song_details.save')}</button>
+			</div>
+		</form>
+	</Dialog.Content>
+</Dialog.Root>
+{/if}
+
+{#if downloadMounted}<DownloadDialog bind:open={downloadOpen} onClose={finishDownloadDialogClose} songs={[song]} />{/if}
 
 {#if linksOnly}
 	<TempoPitchDialog bind:open={advancedOpen} />

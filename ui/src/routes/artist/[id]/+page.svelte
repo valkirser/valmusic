@@ -22,7 +22,7 @@
 	import Shelf from '$lib/components/Shelf.svelte';
 	import { Skeleton } from '$lib/components/ui/skeleton';
 	import * as api from '$lib/api';
-	import type { ArtistPage, BrowseItem, PlaylistPage } from '$lib/api';
+	import type { ArtistPage, BrowseItem, PlaylistPage, SongItem } from '$lib/api';
 	import {
 		addPick,
 		blockArtist,
@@ -31,6 +31,7 @@
 		isSaved,
 		playback,
 		openAddToPlaylist,
+		openNewPlaylist,
 		playFrom,
 		startRadio,
 		toast,
@@ -48,6 +49,11 @@
 	let subscribed = $state(false);
 	let subBusy = $state(false);
 	let shuffleBusy = $state(false);
+	let discographyOpen = $state(false);
+	let includeFeatures = $state(false);
+	let includeCollabAlbums = $state(false);
+	let discographyBusy = $state(false);
+	let discographyProgress = $state('');
 
 	const id = $derived(page.params.id ?? '');
 	const nowId = $derived(playback.now?.videoId);
@@ -90,8 +96,110 @@
 	let anchor = $state(NO_ANCHOR);
 
 	function openMenu(e: MouseEvent) {
+		e.stopPropagation();
 		anchor = anchorMenu(e);
 		menuOpen = true;
+	}
+
+	function isFeatured(song: SongItem): boolean {
+		const runs = song.artist_runs ?? [];
+		const match = runs.findIndex((run) => run.id === id);
+		if (match >= 0) return match > 0;
+		if (song.artist_id) return song.artist_id !== id;
+		return !!artist?.name && !song.artists.toLocaleLowerCase().startsWith(artist.name.toLocaleLowerCase());
+	}
+
+	async function createDiscographyPlaylist() {
+		if (!artist || discographyBusy) return;
+		discographyBusy = true;
+		const releases = new Map<string, BrowseItem>();
+		const releaseSection = /(album|single|\bep\b|compilation|featured)/i;
+		try {
+			for (const section of artist.sections.filter((entry) => releaseSection.test(entry.title))) {
+				const featuredSection = /featured/i.test(section.title);
+				for (const item of section.items) {
+					if (
+						(item.kind === 'album' && (!featuredSection || includeFeatures)) ||
+						(includeFeatures && featuredSection && item.kind === 'playlist')
+					) {
+						releases.set(item.id, item);
+					}
+				}
+				if (section.moreBrowseId && (!featuredSection || includeFeatures)) {
+					const more = await api.getBrowseGrid(section.moreBrowseId, section.moreParams);
+					for (const item of more) {
+						if (
+							(item.kind === 'album' && (!featuredSection || includeFeatures)) ||
+							(includeFeatures && featuredSection && item.kind === 'playlist')
+						) {
+							releases.set(item.id, item);
+						}
+					}
+				}
+			}
+			const releaseList = [...releases.values()];
+			const songs = new Map<string, SongItem>();
+			let failed = 0;
+			for (let start = 0; start < releaseList.length; start += 4) {
+				discographyProgress = t('artist.discography_progress', { current: Math.min(start + 4, releaseList.length), total: releaseList.length });
+				const batch = await Promise.all(
+					releaseList.slice(start, start + 4).map(async (release) => {
+						try {
+							let tracks: SongItem[];
+							let playlistId: string | undefined;
+							let token: string | undefined;
+							if (release.kind === 'playlist') {
+								const playlist = await api.getPlaylist(release.id);
+								tracks = [...playlist.items];
+								playlistId = release.id;
+								token = playlist.continuation;
+							} else {
+								const album = await api.getAlbum(release.id);
+								const linkedIds = [...new Set(
+									(album.artistRuns ?? []).flatMap((run) => (run.id ? [run.id] : []))
+								)];
+								const primaryId = album.artistId ?? linkedIds[0];
+								const collab =
+									(primaryId !== undefined && primaryId !== id) ||
+									linkedIds.some((artistId) => artistId !== id);
+								if (collab && !includeCollabAlbums) return [];
+								tracks = [...album.items];
+								playlistId = album.playlistId;
+								token = album.continuation;
+							}
+							while (token && playlistId) {
+								const more = await api.getPlaylistMore(token, playlistId);
+								tracks.push(...more.items);
+								token = more.continuation;
+							}
+							return tracks;
+						} catch {
+							failed++;
+							return [];
+						}
+					})
+				);
+				for (const track of batch.flat()) {
+					if (includeFeatures || !isFeatured(track)) songs.set(track.video_id, track);
+				}
+			}
+			for (const track of artist.topSongs) {
+				if (includeFeatures || !isFeatured(track)) songs.set(track.video_id, track);
+			}
+			const tracks = [...songs.values()];
+			if (!tracks.length) {
+				toast.error(t('artist.discography_empty'));
+				return;
+			}
+			discographyOpen = false;
+			openNewPlaylist(tracks);
+			if (failed) toast.info(t('artist.discography_partial', { count: failed }));
+		} catch (e) {
+			toast.error(String(e));
+		} finally {
+			discographyBusy = false;
+			discographyProgress = '';
+		}
 	}
 
 	// This artist as a card, for the sidebar's last-played sort and the Shortcuts grid.
@@ -361,6 +469,17 @@
 		>
 			<HugeiconsIcon icon={Share08Icon} class="h-4 w-4" /> {t('player.share')}
 		</button>
+		<button
+			class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+			onclick={() => {
+				menuOpen = false;
+				includeFeatures = false;
+				includeCollabAlbums = false;
+				discographyOpen = true;
+			}}
+		>
+			<span class="w-4 text-center" aria-hidden="true">＋</span> {t('artist.create_discography_playlist')}
+		</button>
 		{#if artist?.name}
 			<button
 				class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
@@ -372,5 +491,29 @@
 				<HugeiconsIcon icon={UserBlock01Icon} class="h-4 w-4" /> {t('player.block_artist')}
 			</button>
 		{/if}
+	</div>
+{/if}
+
+{#if discographyOpen}
+	<div class="fixed inset-0 z-[80] flex cursor-default items-center justify-center bg-black/55 p-4" role="presentation" onclick={(e) => e.stopPropagation()}>
+		<section class="w-full max-w-md space-y-4 rounded-xl border bg-card p-5 text-card-foreground shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="discography-title">
+			<div>
+				<h2 id="discography-title" class="text-lg font-semibold">{t('artist.create_discography_playlist')}</h2>
+				<p class="mt-1 text-sm text-muted-foreground">{t('artist.discography_hint')}</p>
+			</div>
+			<label class="flex cursor-pointer items-center gap-2 text-sm">
+				<input type="checkbox" bind:checked={includeFeatures} />
+				{t('artist.include_features')}
+			</label>
+			<label class="flex cursor-pointer items-center gap-2 text-sm">
+				<input type="checkbox" bind:checked={includeCollabAlbums} />
+				{t('artist.include_collab_albums')}
+			</label>
+			{#if discographyProgress}<p class="text-sm text-muted-foreground" aria-live="polite">{discographyProgress}</p>{/if}
+			<div class="flex justify-end gap-2">
+				<button class="cursor-pointer rounded-md px-3 py-2 text-sm hover:bg-accent" disabled={discographyBusy} onclick={() => (discographyOpen = false)}>{t('common.cancel')}</button>
+				<button class="cursor-pointer rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-50" disabled={discographyBusy} onclick={createDiscographyPlaylist}>{discographyBusy ? t('common.loading') : t('artist.create_playlist')}</button>
+			</div>
+		</section>
 	</div>
 {/if}

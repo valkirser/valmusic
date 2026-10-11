@@ -41,8 +41,7 @@
 		availableMessage,
 		checkForUpdatesInteractive,
 		installUpdate,
-		openDownloadPage,
-		recheckForUpdates
+		openDownloadPage
 	} from '$lib/updater.svelte';
 	import { getVersion } from '@tauri-apps/api/app';
 	import { t, setLocale, currentLocale, LOCALES } from '$lib/i18n.svelte';
@@ -105,10 +104,6 @@
 	let clearing = $state(false);
 	let version = $state('');
 	getVersion().then((v) => (version = v));
-	// Release candidates ship only what the updater installs, so an .rpm, .deb or AUR install has
-	// nothing to take from the beta channel. Shown in dev, which is never the AppImage either.
-	let betaAvailable = $state(import.meta.env.DEV);
-	api.canSelfUpdate().then((v) => (betaAvailable ||= v)).catch(() => {});
 	// Result of the last "Check for updates" click — shown inline (a toast renders behind the modal).
 	let updateResult = $state<{ message: string; error: boolean } | null>(null);
 
@@ -183,15 +178,13 @@
 	async function openBugForm() {
 		diagError = '';
 		try {
-			// GitHub's prefill only reaches `input` and `textarea` fields, so the "Which system?"
-			// dropdown stays the user's one click and everything the app knows goes in `system`.
 			const system = await api.diagnosticsSummary();
-			const q = new URLSearchParams({
+			const query = new URLSearchParams({
 				template: 'bug_report.yml',
 				version,
 				system
 			});
-			await api.openExternal(`https://github.com/SimoHypers/limusic/issues/new?${q}`);
+			await api.openExternal(`https://github.com/valkirser/valmusic/issues/new?${query}`);
 		} catch (e) {
 			diagError = String(e);
 		}
@@ -238,7 +231,6 @@
 	// Off by default: shuffle keeps what was added with Add to queue behind the playlist (#369).
 	const shuffleWholeOn = $derived(settings.shuffle_whole_queue === 'true');
 	const updateBannerOn = $derived(settings.update_banner !== 'false');
-	const betaOn = $derived(settings.update_channel === 'beta');
 	const trayOn = $derived(settings.close_to_tray !== 'false');
 	const trackNotificationsOn = $derived(settings.track_notifications === 'true');
 	const autostartOn = $derived(settings.autostart === 'true');
@@ -329,12 +321,6 @@
 	async function setUpdateBanner(on: boolean) {
 		settings.update_banner = on ? 'true' : 'false';
 		await api.setSetting('update_banner', settings.update_banner);
-	}
-
-	async function setBeta(on: boolean) {
-		settings.update_channel = on ? 'beta' : 'stable';
-		await api.setSetting('update_channel', settings.update_channel);
-		await recheckForUpdates();
 	}
 
 	async function setTray(on: boolean) {
@@ -715,7 +701,7 @@
 							class="mb-7 rounded-xl border bg-gradient-to-br from-primary/8 to-transparent px-4 py-4"
 						>
 							<div class="flex items-center gap-2">
-								<span class="font-heading text-lg font-bold">Limusic</span>
+								<span class="font-heading text-lg font-bold">ValMusic</span>
 								{#if version}
 									<span
 										class="rounded-full bg-primary/12 px-2 py-0.5 text-[11px] font-semibold text-primary"
@@ -760,14 +746,6 @@
 									control: bannerSwitch,
 									tall: true
 								})}
-								{#if betaAvailable}
-									{@render row({
-										title: t('settings.about.beta'),
-										desc: t('settings.about.beta_hint'),
-										control: betaSwitch,
-										tall: true
-									})}
-								{/if}
 							</div>
 						</section>
 
@@ -926,7 +904,6 @@
 {/snippet}
 {#snippet hideVideoSwitch()}<Switch checked={hideVideosOn} onCheckedChange={setHideVideos} />{/snippet}
 {#snippet bannerSwitch()}<Switch checked={updateBannerOn} onCheckedChange={setUpdateBanner} />{/snippet}
-{#snippet betaSwitch()}<Switch checked={betaOn} onCheckedChange={setBeta} />{/snippet}
 
 <!-- Segmented, not three buttons: the options are one exclusive choice and should look like it. -->
 {#snippet qualityPicker()}

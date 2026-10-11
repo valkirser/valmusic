@@ -25,9 +25,9 @@ body:
   - type: input
     id: version
     attributes:
-      label: Which version of Limusic?
+      label: Which version of ValMusic?
       description: Settings, About tab. Skip this if you cannot find it.
-      placeholder: "0.4.6"
+      placeholder: "1.0.0"
 
   - type: textarea
     id: system

@@ -58,7 +58,7 @@ const ERR_TEMP_UNAVAILABLE: i64 = 16;
 /// How scrobbling behaves, from the Scrobbling settings tab (#327, #404). One JSON blob in the
 /// `lastfm_config` setting, the same pattern as `discord_rpc_config`: a new knob is a field here,
 /// a field in `ui/src/lib/scrobble.ts`, and a control in the tab. Missing or unparseable fields
-/// fall back to [`Default`], which is exactly how Limusic scrobbled before the tab existed.
+/// fall back to [`Default`], which is exactly how ValMusic scrobbled before the tab existed.
 #[derive(Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct ScrobbleConfig {

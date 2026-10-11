@@ -246,7 +246,7 @@
 	     12px, not `rounded-lg`: that resolves to --radius, which every theme sets differently, so
 	     the window corner used to change with the theme. This is the GNOME/Adwaita value (#65). -->
 	<div
-		class="relative flex h-screen flex-col overflow-hidden text-foreground {video.hole
+		class="app-window-shell relative flex h-screen flex-col overflow-hidden text-foreground {video.hole
 			? ''
 			: 'bg-background'} {win.maximized ||
 		ui.theaterOpen ||

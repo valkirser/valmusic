@@ -30,12 +30,14 @@
 		hideThumb = false,
 		compact = false,
 		showPlayCount = false,
+		reorderable = false,
 		hideRating = false,
 		onplay,
 		onAdd,
 		onRemove,
 		removeLabel = t('player.remove_from_playlist'),
 		playlistId,
+		metadataPlaylistId,
 		queueIndex,
 		inLibraryList = false,
 		selection,
@@ -59,6 +61,7 @@
 		 * page (queue, previously played) and a narrow panel has no width to spare for it.
 		 */
 		showPlayCount?: boolean;
+		reorderable?: boolean;
 		/**
 		 * The narrow queue-panel variant: drops the inline thumbs and the explicit mark. Two buttons
 		 * plus the duration leave nothing for the title and artists at that width, and the queue is
@@ -75,6 +78,7 @@
 		removeLabel?: string;
 		/** The playlist this row is playing from — adds "Remove from this playlist" to its menu. */
 		playlistId?: string | null;
+		metadataPlaylistId?: string | null;
 		/** This row's index in the backend queue, where it is one (the queue panel). */
 		queueIndex?: number;
 		/** Optional list-owned selection; the key identifies this occurrence, not the song. */
@@ -264,12 +268,15 @@
 		<div class="flex min-w-0 shrink-0 items-center gap-3">
 			{#if index !== undefined}
 				<span
-					class="relative w-5 shrink-0 text-center text-xs {active
+					class="relative w-5 shrink-0 text-center text-xs {reorderable
+						? 'text-muted-foreground'
+						: active
 						? 'text-primary'
 						: 'text-muted-foreground'}"
+					title={reorderable ? t('sort.drag_reorder') : undefined}
 				>
 					<!-- Kept in flow on the playing row too, invisible: it is what sizes the column. -->
-					<span class={active ? 'invisible' : selectable ? '' : 'group-hover:invisible'}>
+					<span class={reorderable ? '' : active ? 'invisible' : selectable ? '' : 'group-hover:invisible'}>
 						{index + 1}
 					</span>
 					{#if active}
@@ -277,12 +284,12 @@
 						     loops keeps the compositor from ever idling while a track plays. -->
 						<HugeiconsIcon
 							icon={VolumeHighIcon}
-							class="absolute inset-0 m-auto h-3.5 w-3.5 {selectable ? '' : 'group-hover:invisible'}"
+							class="absolute inset-0 m-auto h-3.5 w-3.5 {reorderable ? 'invisible' : selectable ? '' : 'group-hover:invisible'}"
 						/>
 					{/if}
 					<HugeiconsIcon
 						icon={guestAdd ? PlayListAddIcon : PlayIcon}
-						class="invisible absolute inset-0 m-auto h-3.5 w-3.5 {selectable ? '' : 'group-hover:visible'}"
+						class="invisible absolute inset-0 m-auto h-3.5 w-3.5 {reorderable ? 'invisible' : selectable ? '' : 'group-hover:visible'}"
 					/>
 				</span>
 			{/if}
@@ -407,6 +414,7 @@
 			{onRemove}
 			{removeLabel}
 			{playlistId}
+			{metadataPlaylistId}
 			{queueIndex}
 			{inLibraryList}
 			triggerClass="cursor-pointer rounded-md p-1.5 text-muted-foreground hover:bg-accent/20 hover:text-foreground {compact

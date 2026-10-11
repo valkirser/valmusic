@@ -1198,6 +1198,7 @@ impl AppState {
                 video_id: video_id.to_owned(),
                 stream_url: c.url,
                 itag: c.itag,
+                mime_type: if c.itag == 140 { "audio/mp4".into() } else { "audio/webm; codecs=\"opus\"".into() },
                 headers,
                 expires_in_seconds: c.expires_at - now,
                 loudness_db: c.loudness_db,
@@ -2282,6 +2283,81 @@ impl AppState {
     async fn current_item(&self) -> Option<SongItem> {
         let q = self.queue.lock().await;
         q.items.get(q.current).cloned()
+    }
+
+    /// Apply playlist-scoped display metadata to the song already playing from that playlist.
+    /// This updates the webview, OS media controls, and Discord without reloading the audio.
+    pub async fn update_current_metadata(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+        title: &str,
+        artists: &str,
+        thumbnail: &str,
+        artist_runs: &[innertube::models::metadata::ArtistRun],
+    ) {
+        let current = {
+            let mut q = self.queue.lock().await;
+            if q.source_id.as_deref() != Some(playlist_id) {
+                return;
+            }
+            let index = q.current;
+            let Some(item) = q.items.get_mut(index).filter(|item| item.video_id == video_id) else {
+                return;
+            };
+            // Empty fields mean "use the source value" in storage. The item already contains
+            // that source value when no earlier override changed it.
+            if !title.is_empty() {
+                item.title = title.to_owned();
+            }
+            if !artists.is_empty() {
+                item.artists = artists.to_owned();
+            }
+            if !thumbnail.is_empty() {
+                item.thumbnail = Some(thumbnail.to_owned());
+            }
+            item.artist_runs = artist_runs.to_vec();
+            item.artist_id = artist_runs.iter().find_map(|run| run.id.clone());
+            let item = item.clone();
+            let stream_client = q.current_client.as_deref().unwrap_or("current").to_owned();
+            self.last_queue_fingerprint
+                .store(queue_fingerprint(&q.items), Ordering::Relaxed);
+            (
+                item,
+                stream_client,
+                q.current,
+                q.shuffle_orig.is_some(),
+                q.repeat,
+                q.source_name.clone(),
+                q.source_id.clone(),
+            )
+        };
+        let (item, stream_client, current_index, shuffle, repeat, source_name, source_id) = current;
+        let _ = self
+            .app
+            .emit("now-playing-metadata-updated", Self::now_playing_json(&item, &stream_client));
+        // The queue list did change, but only its current row. Keep this update small for long queues.
+        let _ = self.app.emit("queue-index", serde_json::json!({
+            "currentIndex": current_index,
+            "shuffle": shuffle,
+            "repeat": repeat,
+            "sourceName": source_name,
+            "sourceId": source_id,
+            "current": item,
+        }));
+        if let Some(media) = &self.media {
+            let cover = item.thumbnail.as_deref().map(|url| {
+                if url.contains("://") {
+                    crate::media::cover_url(url)
+                } else {
+                    format!("file://{url}")
+                }
+            });
+            media.set_metadata(&item.title, &item.artists, item.album.as_deref(), cover.as_deref());
+        }
+        if let Some(discord) = &self.discord {
+            discord.update_track_metadata(&item);
+        }
     }
 
     /// [`loudness_gain`] for one track, honouring the `normalize_volume` setting. Off means mpv

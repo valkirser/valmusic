@@ -19,19 +19,24 @@
 # CI has attached the binaries, the updater endpoint (.../releases/latest/download/latest.json)
 # keeps resolving to the previous, complete manifest instead of one with no platforms in it.
 #
-# Usage:  scripts/release.sh ["release notes"]
+# Usage:  VALMUSIC_GITHUB_REPO=OWNER/ValMusic scripts/release.sh ["release notes"]
 # Bump "version" in src-tauri/tauri.conf.json AND Cargo.toml BEFORE running (tauri.conf.json is the
 # app version the updater compares against; the preflight below refuses to run if they disagree).
 #
-# Requires: the private signing key at ~/.tauri/limusic.key, `gh` authed, jq, curl.
+# Requires: the private signing key at ~/.tauri/valmusic.key, `gh` authed, jq, curl.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REPO="SimoHypers/limusic"
-KEY="${TAURI_SIGNING_PRIVATE_KEY_FILE:-$HOME/.tauri/limusic.key}"
+KEY="${TAURI_SIGNING_PRIVATE_KEY_FILE:-$HOME/.tauri/valmusic.key}"
 NOTES="${1:-See the commit history for changes.}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+# The copied release helper originally published to the Limusic repository. Require the fork's
+# destination explicitly so running it from this checkout cannot publish upstream by accident.
+REPO="${VALMUSIC_GITHUB_REPO:-}"
+[ -n "$REPO" ] || die "Set VALMUSIC_GITHUB_REPO=OWNER/ValMusic to the fork you intend to publish."
+[ "$REPO" != "SimoHypers/limusic" ] || die "Refusing to publish a ValMusic release to the Limusic upstream repository."
 
 # semver_gt A B: A ranks above B. x.y.z numerically, then a release above its own prereleases, then
 # prerelease suffixes by version sort. `sort -V` alone gets the middle rule backwards: it puts

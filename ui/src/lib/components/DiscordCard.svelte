@@ -5,7 +5,7 @@
 	// what your friends will read.
 	//
 	// The colors are Discord's, hardcoded rather than taken from the theme tokens. This is a picture
-	// of another application, so following the user's Limusic theme would make it *less* accurate,
+	// of another application, so following the user's ValMusic theme would make it *less* accurate,
 	// not more. Same reasoning for the English strings marked below: Discord renders "Listening to"
 	// in the *viewer's* language, and the button labels are ours, sent over the wire in English.
 	import { HugeiconsIcon } from '@hugeicons/svelte';
@@ -37,7 +37,7 @@
 	/** Discord's own wording, deliberately untranslated — see the note at the top. */
 	const LISTENING_TO = 'Listening to';
 
-	const appName = $derived(cfg.app_name.trim() || 'Limusic');
+	const appName = $derived(cfg.app_name.trim() || 'ValMusic');
 	// The profile card's header is *always* the application name. `status_display_type` only moves
 	// the one-line status Discord writes under your name in the member list, which is why that gets
 	// its own mock below rather than being folded into this header.

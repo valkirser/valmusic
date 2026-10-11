@@ -2,6 +2,11 @@
 //! past here; the UI never sees a stream URL.
 
 use std::sync::Arc;
+use std::{
+    io::Write,
+    path::Path,
+    process::{Command, Stdio},
+};
 
 use innertube::{
     AlbumPage, ArtistPage, BrowseItem, HistoryGroup, HomePage, MoodSection, PlaylistContinuation,
@@ -217,12 +222,334 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
     Ok(state.queue_snapshot().await)
 }
 
+/// Save a per-song display override. It is local to this ValMusic installation and never writes
+/// metadata back to YouTube. Empty fields restore the source value.
+#[tauri::command]
+pub async fn set_song_metadata(
+    state: St<'_>,
+    playlist_id: String,
+    video_id: String,
+    title: String,
+    artists: String,
+    thumbnail: String,
+    artist_runs: Vec<innertube::models::metadata::ArtistRun>,
+) -> Result<(), String> {
+    let video_id = video_id.trim();
+    if video_id.is_empty() || video_id.len() > 128 {
+        return Err("Invalid song id.".into());
+    }
+    let playlist_id = playlist_id.trim();
+    if playlist_id.is_empty() || playlist_id.len() > 512 {
+        return Err("Invalid playlist id.".into());
+    }
+    let title = title.trim();
+    let artists = artists.trim();
+    let thumbnail = thumbnail.trim();
+    if title.len() > 500 || artists.len() > 500 {
+        return Err("Song name and artists must be under 500 characters.".into());
+    }
+    if !thumbnail.is_empty()
+        && !(thumbnail.starts_with("https://") || thumbnail.starts_with("http://"))
+    {
+        return Err("Cover art must be an http or https image URL.".into());
+    }
+    let artist_runs: Vec<innertube::models::metadata::ArtistRun> = artist_runs
+        .into_iter()
+        .map(|mut run| {
+            run.text = if run.id.is_none() && run.text.trim() == "," {
+                ", ".to_owned()
+            } else {
+                run.text.trim().to_owned()
+            };
+            run.id = run.id.map(|id| id.trim().to_owned()).filter(|id| id.starts_with("UC") && id.len() <= 128);
+            run
+        })
+        .filter(|run| !run.text.is_empty())
+        .take(40)
+        .collect();
+    let artist_ids: Vec<&str> = artist_runs.iter().filter_map(|run| run.id.as_deref()).collect();
+    let artist_id = artist_ids.first().copied();
+    let value = serde_json::json!({
+        "title": title,
+        "artists": artists,
+        "thumbnail": thumbnail,
+        "artistIds": artist_ids,
+        "artistRuns": artist_runs
+    });
+    let key = song_metadata_key(playlist_id, video_id);
+    if title.is_empty() && artists.is_empty() && thumbnail.is_empty() {
+        state.db.delete_setting(&key);
+    } else {
+        state.db.set_setting(&key, &value.to_string());
+    }
+    state
+        .update_current_metadata(playlist_id, video_id, title, artists, thumbnail, &artist_runs)
+        .await;
+    let _ = state.app.emit("song-metadata-updated", serde_json::json!({
+        "playlistId": playlist_id, "videoId": video_id, "title": title, "artists": artists, "thumbnail": thumbnail,
+        "artistId": artist_id,
+        "artistRuns": artist_runs
+    }));
+    Ok(())
+}
+
+/// Download one track or several tracks. Multi-track downloads are packaged as one ZIP named for
+/// the playlist; converted formats use the bundled FFmpeg executable when available, then PATH.
+#[tauri::command]
+pub async fn download_songs(
+    state: St<'_>,
+    items: Vec<SongItem>,
+    folder: String,
+    format: String,
+    playlist_name: Option<String>,
+    archive: bool,
+) -> Result<String, String> {
+    use futures_util::StreamExt;
+    use tauri::Emitter;
+    use zip::write::SimpleFileOptions;
+
+    if items.is_empty() || items.len() > 20_000 {
+        return Err("Choose at least one song.".into());
+    }
+    if !archive && items.len() != 1 {
+        return Err("A single-song download must contain exactly one song.".into());
+    }
+    if !matches!(format.as_str(), "original" | "mp3" | "flac" | "wav" | "m4a" | "opus") {
+        return Err("Unsupported audio format.".into());
+    }
+    if folder.trim().is_empty() {
+        return Err("Choose a destination folder.".into());
+    }
+    let target = Path::new(&folder);
+    std::fs::create_dir_all(target).map_err(|e| format!("Could not open the download folder: {e}"))?;
+    let target = target.canonicalize().map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let nonce = rand::random::<u64>();
+    let staging = std::env::temp_dir()
+        .join(format!("valmusic-download-{}-{stamp}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let total = items.len();
+    let quality = match state.db.get_setting("quality").as_deref() {
+        Some("LOW") => innertube::AudioQuality::Low,
+        Some("AUTO") => innertube::AudioQuality::Auto,
+        _ => innertube::AudioQuality::High,
+    };
+    let disabled = state.disabled_clients();
+    let client = crate::http::client();
+    let local_paths: Option<std::collections::HashSet<String>> = items
+        .iter()
+        .any(|song| crate::local::is_local_song(&song.video_id))
+        .then(|| state.db.local_tracks(None).into_iter().map(|track| track.path).collect());
+    let mut output_names = Vec::with_capacity(total);
+    let result: Result<String, String> = async {
+        for (index, song) in items.into_iter().enumerate() {
+            let raw_path = staging.join(format!("{index:05}.source"));
+            let raw_ext;
+            if let Some(path) = crate::local::song_path(&song.video_id) {
+                if !local_paths.as_ref().is_some_and(|paths| paths.contains(path)) {
+                    return Err("This local file is not in the music library.".into());
+                }
+                let source = Path::new(path);
+                raw_ext = source
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("audio")
+                    .to_ascii_lowercase();
+                std::fs::copy(source, &raw_path).map_err(|e| format!("Could not read {}: {e}", song.title))?;
+            } else {
+                let data = state
+                    .orchestrator
+                    .resolve(&song.video_id, song.is_upload, quality, &disabled)
+                    .await.map_err(|e| e.to_string())?;
+                // Reuse the app's bounded range proxy: googlevideo throttles plain long-running
+                // GETs to around playback speed, while the proxy fetches fast bounded chunks.
+                let local_stream = if crate::http::has_proxy() {
+                    None
+                } else {
+                    crate::audioproxy::register(&data.stream_url, &data.headers)
+                };
+                let source_url = local_stream.as_deref().unwrap_or(&data.stream_url);
+                let mut request = client.get(source_url);
+                if local_stream.is_none() {
+                    for (key, value) in &data.headers {
+                        request = request.header(key.as_str(), value.as_str());
+                    }
+                }
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|_| format!("Network error while downloading {}.", song.title))?
+                    .error_for_status()
+                    .map_err(|_| format!("The audio source refused {}.", song.title))?;
+                let length = response.content_length().unwrap_or(0);
+                raw_ext = if data.mime_type.contains("mp4") { "m4a".into() }
+                    else if data.mime_type.contains("mpeg") { "mp3".into() }
+                    else { "webm".into() };
+                let mut file = std::fs::File::create(&raw_path).map_err(|e| e.to_string())?;
+                let mut stream = response.bytes_stream();
+                let mut received = 0_u64;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|_| format!("Download failed for {}.", song.title))?;
+                    file.write_all(&chunk).map_err(|e| e.to_string())?;
+                    received += chunk.len() as u64;
+                    let fraction = if length > 0 {
+                        (received as f64 / length as f64).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    let _ = state.app.emit("download-progress", serde_json::json!({
+                        "done": index, "total": total, "current": song.title,
+                        "progress": (index as f64 + fraction) / total as f64
+                    }));
+                }
+                file.flush().map_err(|e| e.to_string())?;
+            }
+            let ext = if format == "original" { raw_ext.clone() } else { format.clone() };
+            let stem = format!("{} - {}", song.title, song.artists);
+            let safe = safe_download_name(&stem);
+            let output = staging.join(format!("{index:05}-{safe}.{ext}"));
+            if format == "original" || format == raw_ext {
+                std::fs::rename(&raw_path, &output).map_err(|e| e.to_string())?;
+            } else {
+                let ffmpeg_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+                let ffmpeg = state
+                    .app
+                    .path()
+                    .resolve(
+                        format!("resources/ffmpeg/{ffmpeg_name}"),
+                        tauri::path::BaseDirectory::Resource,
+                    )
+                    .ok()
+                    .filter(|path| path.is_file())
+                    .unwrap_or_else(|| ffmpeg_name.into());
+                let mut ffmpeg_command = Command::new(&ffmpeg);
+                ffmpeg_command
+                    .args(["-nostdin", "-v", "error", "-y", "-i"])
+                    .arg(&raw_path)
+                    .args(["-vn", "-c:a", match format.as_str() {
+                        "mp3" => "libmp3lame", "flac" => "flac", "wav" => "pcm_s16le",
+                        "m4a" => "aac", "opus" => "libopus", _ => unreachable!()
+                    }])
+                    .arg(&output)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::process::CommandExt;
+                    // FFmpeg is a console application. Keep downloads from opening a terminal window.
+                    ffmpeg_command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                let status = ffmpeg_command
+                    .status()
+                    .map_err(|_| "FFmpeg is unavailable in this build. Rebuild ValMusic with bundled FFmpeg; Original audio does not need it.".to_string())?;
+                if !status.success() { return Err(format!("ffmpeg could not convert {}.", song.title)); }
+                let _ = std::fs::remove_file(&raw_path);
+            }
+            let archive_name = if archive {
+                format!("{:04}-{safe}.{ext}", index + 1)
+            } else {
+                format!("{safe}.{ext}")
+            };
+            output_names.push((output, archive_name));
+            let _ = state.app.emit("download-progress", serde_json::json!({
+                "done": index + 1, "total": total, "current": song.title, "progress": (index + 1) as f64 / total as f64
+            }));
+        }
+        if archive {
+            let title = safe_download_name(playlist_name.as_deref().unwrap_or("Playlist"));
+            let archive_path = unique_download_path(&target, &format!("{title}.zip"));
+            let output = std::fs::File::create(&archive_path).map_err(|e| e.to_string())?;
+            let mut zip = zip::ZipWriter::new(output);
+            let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            for (path, name) in &output_names {
+                zip.start_file(name.as_str(), options).map_err(|e| e.to_string())?;
+                let mut source = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                std::io::copy(&mut source, &mut zip).map_err(|e| e.to_string())?;
+            }
+            zip.finish().map_err(|e| e.to_string())?;
+            Ok(archive_path.to_string_lossy().into_owned())
+        } else {
+            let (source, name) = output_names.first().ok_or("No song was downloaded.")?;
+            let path = unique_download_path(&target, name);
+            std::fs::copy(source, &path).map_err(|e| e.to_string())?;
+            Ok(path.to_string_lossy().into_owned())
+        }
+    }.await;
+    let _ = std::fs::remove_dir_all(staging);
+    result
+}
+
+fn safe_download_name(name: &str) -> String {
+    let safe: String = name.chars().map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c }).collect();
+    let safe = safe.trim().trim_matches('.');
+    if safe.is_empty() { "Untitled".into() } else { safe.chars().take(160).collect() }
+}
+
+fn unique_download_path(folder: &Path, name: &str) -> std::path::PathBuf {
+    let requested = folder.join(name);
+    if !requested.exists() {
+        return requested;
+    }
+    let stem = requested.file_stem().and_then(|s| s.to_str()).unwrap_or("Download");
+    let extension = requested.extension().and_then(|s| s.to_str()).unwrap_or("");
+    for n in 2.. {
+        let candidate = if extension.is_empty() {
+            folder.join(format!("{stem} ({n})"))
+        } else {
+            folder.join(format!("{stem} ({n}).{extension}"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    requested
+}
+
+fn song_metadata_key(playlist_id: &str, video_id: &str) -> String {
+    format!("song_metadata:{}:{}", playlist_id, video_id)
+}
+
+fn apply_song_metadata(db: &crate::db::Db, playlist_id: &str, song: &mut SongItem) {
+    let Some(raw) = db.get_setting(&song_metadata_key(playlist_id, &song.video_id)) else { return };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    if let Some(title) = value.get("title").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        song.title = title.to_owned();
+    }
+    if let Some(artists) = value.get("artists").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        song.artists = artists.to_owned();
+        song.artist_runs.clear();
+    }
+    if let Some(thumbnail) = value.get("thumbnail").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        song.thumbnail = Some(thumbnail.to_owned());
+    }
+    if let Some(runs) = value.get("artistRuns").and_then(|v| v.as_array()) {
+        song.artist_runs = serde_json::from_value(serde_json::Value::Array(runs.clone())).unwrap_or_default();
+        song.artist_id = song.artist_runs.iter().find_map(|run| run.id.clone());
+    } else if let Some(ids) = value.get("artistIds").and_then(|v| v.as_array()) {
+        song.artist_id = ids.first().and_then(|id| id.as_str()).filter(|id| !id.is_empty()).map(str::to_owned);
+        let names: Vec<&str> = song.artists.split(", ").filter(|name| !name.is_empty()).collect();
+        let mut artist_runs = Vec::new();
+        for (index, (name, id)) in names.into_iter().zip(ids.iter()).enumerate() {
+            if index > 0 {
+                artist_runs.push(innertube::models::metadata::ArtistRun { text: ", ".into(), id: None });
+            }
+            let id = id.as_str().filter(|id| id.starts_with("UC")).map(str::to_owned);
+            artist_runs.push(innertube::models::metadata::ArtistRun { text: name.into(), id });
+        }
+        song.artist_runs = artist_runs;
+    }
+}
+
 /// Settings the UI is allowed to read *and write*. Session/auth material (`session_cookie`,
 /// `selected_identity_json`, `data_sync_id`, `account_json`, `account_selection_pending`,
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 29] = [
+const UI_SETTINGS: [&str; 28] = [
     "volume",
     "proxy",
     "quality",
@@ -239,7 +566,6 @@ const UI_SETTINGS: [&str; 29] = [
     "hide_videos",
     "prevent_duplicates",
     "update_banner",
-    "update_channel",
     "lyrics_providers",
     "music_videos",
     "ambient_light",
@@ -725,7 +1051,7 @@ pub async fn open_mini(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Swap back. Same path as the tray, so the widget and the tray can't disagree about what
-/// "show Limusic" means.
+/// "show ValMusic" means.
 #[tauri::command]
 pub async fn close_mini(app: tauri::AppHandle) -> Result<(), String> {
     crate::tray::show_main(&app);
@@ -883,7 +1209,10 @@ pub async fn get_playlist(
     desc: Option<bool>,
 ) -> Result<PlaylistPage, String> {
     if id == ON_REPEAT_ID {
-        let items = on_repeat_songs(&state);
+        let mut items = on_repeat_songs(&state);
+        for song in &mut items {
+            apply_song_metadata(&state.db, &id, song);
+        }
         return Ok(PlaylistPage {
             title: Some("On Repeat".into()),
             subtitle: Some(format!("{} songs you've played most this month", items.len())),
@@ -899,11 +1228,18 @@ pub async fn get_playlist(
         });
     }
     if is_local_playlist(&id) {
-        return local_playlist_page(&state, &id);
+        let mut page = local_playlist_page(&state, &id)?;
+        for song in &mut page.items {
+            apply_song_metadata(&state.db, &id, song);
+        }
+        return Ok(page);
     }
     let client = metadata_client(&state)?;
     let sort = sort.map(|s| (s, desc.unwrap_or(false)));
     let mut page = state.it.playlist(client, &id, sort).await.map_err(|e| e.to_string())?;
+    for song in &mut page.items {
+        apply_song_metadata(&state.db, &id, song);
+    }
     // Alongside YouTube's own thumbnail, not over it: the dialog offers to drop the custom one.
     page.cover = custom_cover(&state, &id);
     Ok(page)
@@ -975,9 +1311,16 @@ fn now_secs() -> i64 {
 pub async fn get_playlist_more(
     state: St<'_>,
     token: String,
+    playlist_id: Option<String>,
 ) -> Result<PlaylistContinuation, String> {
     let client = metadata_client(&state)?;
-    state.it.playlist_continuation(client, &token).await.map_err(|e| e.to_string())
+    let mut page = state.it.playlist_continuation(client, &token).await.map_err(|e| e.to_string())?;
+    if let Some(playlist_id) = playlist_id.as_deref() {
+        for song in &mut page.items {
+            apply_song_metadata(&state.db, playlist_id, song);
+        }
+    }
+    Ok(page)
 }
 
 /// An album page. `id` is the album browseId (`MPRE…`).
@@ -2054,8 +2397,8 @@ pub async fn release_notes() -> Result<Vec<ReleaseNote>, String> {
         prerelease: bool,
     }
     let releases: Vec<GhRelease> = crate::http::client()
-        .get("https://api.github.com/repos/SimoHypers/limusic/releases?per_page=20")
-        .header("User-Agent", concat!("Limusic/", env!("CARGO_PKG_VERSION")))
+        .get("https://api.github.com/repos/valkirser/valmusic/releases?per_page=20")
+        .header("User-Agent", concat!("ValMusic/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(15))
         .send()
@@ -2086,7 +2429,7 @@ pub async fn release_notes() -> Result<Vec<ReleaseNote>, String> {
 /// Tauri's Linux updater knows one trick: rewrite an AppImage in place. It takes the path from
 /// `Env::appimage` and, when that is unset, falls back to `current_exe()` and writes the downloaded
 /// AppImage bytes over whatever it finds there. On the `.rpm` and on distro packages (the AUR's
-/// `limusic-bin`) that is a package-manager-owned `/usr/bin/limusic-app`: it fails on permissions
+/// `valmusic-bin`) that is a package-manager-owned `/usr/bin/valmusic-app`: it fails on permissions
 /// rather than doing damage, but offering the button at all is a lie. Those users update through
 /// their package manager, so the UI shows them a download link instead.
 ///
@@ -2105,56 +2448,6 @@ pub fn can_self_update(app: tauri::AppHandle) -> bool {
         let _ = app;
         true
     }
-}
-
-/// The beta channel's manifest. `beta` is a permanent prerelease holding nothing but this file, and
-/// the release workflows move it to the newest release candidate, or to the newest release once that
-/// is ahead, so the URL never changes.
-const BETA_MANIFEST: &str =
-    "https://github.com/SimoHypers/limusic/releases/download/beta/latest.json";
-
-/// What the updater plugin's own `check` command returns, so the UI can wrap it in the plugin's
-/// `Update` class and install it the usual way.
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BetaUpdate {
-    rid: tauri::ResourceId,
-    current_version: String,
-    version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    body: Option<String>,
-    raw_json: serde_json::Value,
-}
-
-/// The updater plugin's `check()`, pointed at the beta manifest. The plugin takes its endpoint from
-/// tauri.conf.json and its JS `check` has no way to pass another, so this mirrors its `check`
-/// command (tauri-plugin-updater 2.10.1, `commands.rs`) with the endpoint swapped. The `Update` goes
-/// into the same resource table, which is what lets the plugin's `downloadAndInstall` find it.
-///
-/// Any different version counts, same as `allowDowngrades` on stable: the pointer only moves forward
-/// by itself, so a lower version there is a beta rollback somebody made on purpose.
-#[tauri::command]
-pub async fn check_beta_update(webview: tauri::Webview) -> Result<Option<BetaUpdate>, String> {
-    use tauri::Manager;
-    use tauri_plugin_updater::UpdaterExt;
-    let url = tauri::Url::parse(BETA_MANIFEST).map_err(|e| e.to_string())?;
-    let update = webview
-        .updater_builder()
-        .endpoints(vec![url])
-        .map_err(|e| e.to_string())?
-        .version_comparator(|current, remote| remote.version != current)
-        .build()
-        .map_err(|e| e.to_string())?
-        .check()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(update.map(|u| BetaUpdate {
-        current_version: u.current_version.clone(),
-        version: u.version.clone(),
-        body: u.body.clone(),
-        raw_json: u.raw_json.clone(),
-        rid: webview.resources_table().add(u),
-    }))
 }
 
 /// Open a link from the UI in the real browser. An `<a href>` inside the webview would navigate

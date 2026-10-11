@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { flip } from 'svelte/animate';
+	import { onMount, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { HugeiconsIcon } from '@hugeicons/svelte';
@@ -36,6 +37,7 @@
 	import EditPlaylistDialog from '$lib/components/EditPlaylistDialog.svelte';
 	import TrackFilter, { filterTracks } from '$lib/components/TrackFilter.svelte';
 	import TrackRowSkeleton from '$lib/components/TrackRowSkeleton.svelte';
+	import DownloadDialog from '$lib/components/DownloadDialog.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import * as api from '$lib/api';
 	import { ON_REPEAT_ID } from '$lib/api';
@@ -89,6 +91,32 @@
 	// here because every write below reassigns the whole object (`pl = { ...pl, … }`); nothing
 	// mutates `pl` in place. Keep it that way, or the page stops updating.
 	let pl = $state.raw<PlaylistPage | null>(null);
+	onMount(() => {
+		let unlisten: (() => void) | undefined;
+		void api.onSongMetadataUpdated((update) => {
+			if (!pl || update.playlistId !== id) return;
+			if (!update.title || !update.artists || !update.thumbnail) {
+				void load(id);
+				return;
+			}
+			pl = {
+				...pl,
+				items: pl.items.map((song) => song.video_id !== update.videoId ? song : ({
+					...song,
+					title: update.title || song.title,
+					artists: update.artists || song.artists,
+					artist_id: update.artistId ?? undefined,
+					artist_runs: update.artistRuns,
+					thumbnail: update.thumbnail || song.thumbnail
+				}))
+			};
+			cacheCurrent();
+		}).then((stop) => (unlisten = stop));
+		return () => {
+			unlisten?.();
+			stopTrackDragScroll();
+		};
+	});
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let loadingMore = $state(false);
@@ -102,6 +130,19 @@
 
 	// ⋯ options menu, positioned `fixed` at the button so it isn't clipped (matches TrackRow).
 	let menuOpen = $state(false);
+	let downloadOpen = $state(false);
+	let downloadMounted = $state(false);
+	let downloadCloseTimer: ReturnType<typeof setTimeout> | undefined;
+	function showDownloadDialog() {
+		if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+		downloadMounted = true;
+		downloadOpen = true;
+	}
+	function finishDownloadDialogClose() {
+		downloadOpen = false;
+		if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+		downloadCloseTimer = setTimeout(() => (downloadMounted = false), 180);
+	}
 	let anchor = $state(NO_ANCHOR);
 
 	// "Edit playlist": name, description, visibility and a cover of your own.
@@ -209,6 +250,13 @@
 	// --- sorting (`$lib/sort`) ---------------------------------------------------------------
 	let sort = $state<SortKey>('default');
 	let desc = $state(false);
+	let customOrder = $state<string[]>([]);
+	let draggingKey = $state('');
+	let suppressDragClick = false;
+	let playlistScroller: HTMLElement | null = null;
+	let dragScrollTimer: ReturnType<typeof setInterval> | undefined;
+	let dragPointerY: number | null = null;
+	let lastDragScrollAt = 0;
 	let sortOpen = $state(false);
 	let sortAnchor = $state(NO_ANCHOR);
 	let preparing = $state(false);
@@ -234,7 +282,7 @@
 
 	// YouTube offers a sort menu for this list, so it does the ordering — all of it except "Most
 	// played", which is our own listening history and means nothing to YouTube.
-	const serverSorted = $derived(!!pl?.sortMenu && sort !== 'plays');
+	const serverSorted = $derived(!!pl?.sortMenu && sort !== 'plays' && sort !== 'custom');
 	// …and on a playlist we own the choice is a write, so every other client follows it.
 	const storable = $derived(pl?.sortMenu?.editable ?? false);
 	// Liked Music has no editable menu, but YouTube remembers whichever order it was last asked
@@ -243,6 +291,7 @@
 
 	const sortedItems = $derived.by(() => {
 		const items = pl?.items ?? [];
+		if (sort === 'custom') return customSorted(items);
 		// The rows already arrived in order, reversed ones included. The single order YouTube has
 		// no params for is a reversed *manual* order, so that one reverse stays here.
 		if (serverSorted) return sort === 'default' && desc ? items.slice().reverse() : items;
@@ -252,13 +301,14 @@
 
 	// The rows actually on screen: the sorted list, narrowed by the header's filter box. Identical
 	// to `sortedItems` with no query typed.
+	const filtering = $derived(!!applied.trim());
 	const shown = $derived(filterTracks(sortedItems, applied));
+	const reorderable = $derived(sort === 'custom' && !filtering && !pl?.continuation);
 	const selection = trackSelection(() => sortedItems, () => shown,
 		() => `${auth.epoch}:${id}`, () => !pl?.continuation,
 		// A filter's matches are only the loaded ones, and typing one walks the list anyway, so the
 		// header count would be the wrong number to offer there.
 		() => (filtering ? undefined : headerCount), loadAll);
-	const filtering = $derived(!!applied.trim());
 	// The leading number of YouTube's own "190 tracks - 9+ hours", which is what the subtitle under
 	// the title shows until every page is in. An upper bound, not a count: it includes rows that
 	// never arrive (unavailable, region-blocked). A locale that doesn't lead with the number gives
@@ -325,7 +375,138 @@
 	// radio mix). Everything else is read back off the browse response instead, so a sort changed
 	// in YouTube Music turns up here too.
 	const SORT_STORE = 'playlist_sort';
+	const CUSTOM_ORDER_STORE = 'playlist_custom_order';
+	const PLAYLIST_TRACK_MIME = 'application/x-limusic-playlist-track';
 	type SavedSort = { sort: SortKey; desc: boolean };
+	const playlistRowKey = (song: SongItem) => song.set_video_id || song.video_id;
+
+	function customSorted(items: SongItem[]): SongItem[] {
+		const byKey = new Map(items.map((song) => [playlistRowKey(song), song]));
+		const seen = new Set<string>();
+		const ordered: SongItem[] = [];
+		for (const key of customOrder) {
+			const song = byKey.get(key);
+			if (song && !seen.has(key)) {
+				ordered.push(song);
+				seen.add(key);
+			}
+		}
+		for (const song of items) {
+			const key = playlistRowKey(song);
+			if (!seen.has(key)) {
+				ordered.push(song);
+				seen.add(key);
+			}
+		}
+		return ordered;
+	}
+
+	function readCustomOrder(pid: string): string[] {
+		try {
+			const all = JSON.parse(localStorage.getItem(CUSTOM_ORDER_STORE) ?? '{}') as Record<string, unknown>;
+			return Array.isArray(all[pid]) ? all[pid].filter((key): key is string => typeof key === 'string') : [];
+		} catch {
+			return [];
+		}
+	}
+
+	function saveCustomOrder(pid: string, order: string[]) {
+		try {
+			const all = JSON.parse(localStorage.getItem(CUSTOM_ORDER_STORE) ?? '{}') as Record<string, string[]>;
+			all[pid] = order;
+			localStorage.setItem(CUSTOM_ORDER_STORE, JSON.stringify(all));
+		} catch {
+			/* A blocked or full store only means this playlist's custom order won't persist. */
+		}
+	}
+
+	function startTrackDrag(event: DragEvent, key: string) {
+		const target = event.target;
+		if (target instanceof Element && target.closest('button, a, input, [role="checkbox"]')) {
+			event.preventDefault();
+			return;
+		}
+		draggingKey = key;
+		suppressDragClick = true;
+		document.body.classList.add('playlist-track-dragging');
+		if (event.dataTransfer) {
+			event.dataTransfer.effectAllowed = 'move';
+			event.dataTransfer.setData(PLAYLIST_TRACK_MIME, key);
+			event.dataTransfer.setData('text/plain', key);
+		}
+	}
+
+	function onPlaylistDragOver(event: DragEvent) {
+		if (
+			!draggingKey ||
+			!playlistScroller ||
+			!event.dataTransfer?.types.includes(PLAYLIST_TRACK_MIME)
+		)
+			return;
+		event.preventDefault();
+		if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+		dragPointerY = event.clientY;
+		if (dragScrollTimer !== undefined) return;
+
+		lastDragScrollAt = performance.now();
+		dragScrollTimer = setInterval(() => {
+			if (!draggingKey || dragPointerY === null || !playlistScroller) {
+				stopTrackDragScroll();
+				return;
+			}
+			const now = performance.now();
+			const elapsed = Math.min(now - lastDragScrollAt, 40) / 1000;
+			lastDragScrollAt = now;
+			const bounds = playlistScroller.getBoundingClientRect();
+			const fromTop = dragPointerY - bounds.top;
+			const fromBottom = bounds.bottom - dragPointerY;
+			const edge = 144;
+			const speed = 420;
+			const velocity = fromTop < edge
+				? -speed * (1 - Math.max(fromTop, 0) / edge)
+				: fromBottom < edge
+					? speed * (1 - Math.max(fromBottom, 0) / edge)
+					: 0;
+			if (velocity) playlistScroller.scrollTop += velocity * elapsed;
+		}, 16);
+	}
+
+	function stopTrackDragScroll() {
+		dragPointerY = null;
+		if (dragScrollTimer !== undefined) clearInterval(dragScrollTimer);
+		dragScrollTimer = undefined;
+	}
+
+	function moveTrackDrag(event: DragEvent, targetKey: string) {
+		if (!draggingKey || draggingKey === targetKey) return;
+		event.preventDefault();
+		if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+		const order = sortedItems.map(playlistRowKey);
+		const from = order.indexOf(draggingKey);
+		const target = order.indexOf(targetKey);
+		if (from < 0 || target < 0) return;
+		const row = event.currentTarget as HTMLElement;
+		const after = event.clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
+		let insertion = target + (after ? 1 : 0);
+		order.splice(from, 1);
+		if (from < insertion) insertion--;
+		order.splice(insertion, 0, draggingKey);
+		if (order.every((key, index) => key === customOrder[index])) return;
+		customOrder = order;
+		saveCustomOrder(id, order);
+	}
+
+	function endTrackDrag() {
+		stopTrackDragScroll();
+		document.body.classList.remove('playlist-track-dragging');
+		draggingKey = '';
+		setTimeout(() => (suppressDragClick = false), 0);
+	}
+
+	function playPlaylistRow(index: number) {
+		if (suppressDragClick) return;
+		playAll(index);
+	}
 
 	function readSort(pid: string): SavedSort | null {
 		try {
@@ -349,12 +530,40 @@
 	function chooseSort(key: SortKey) {
 		sortOpen = false;
 		if (key === sort) return;
+		if (key === 'custom') {
+			void chooseCustomSort();
+			return;
+		}
 		sort = key;
 		if (key === 'plays') loadPlays(); // the list re-sorts itself when the counts land
 		applySort();
 	}
 
+	async function chooseCustomSort() {
+		const pid = id;
+		// Keep the last custom arrangement when returning from another sort. For a playlist that has
+		// never been manually ordered, start with the order currently shown.
+		const savedOrder = readCustomOrder(pid);
+		const startingOrder = savedOrder.length ? savedOrder : sortedItems.map(playlistRowKey);
+		sort = 'custom';
+		desc = false;
+		customOrder = startingOrder;
+		rememberSort(pid, false);
+		if (pl?.continuation) {
+			preparing = true;
+			try {
+				await loadAll();
+			} finally {
+				preparing = false;
+			}
+		}
+		if (pid !== id || !pl) return;
+		customOrder = customSorted(pl.items).map(playlistRowKey);
+		saveCustomOrder(pid, customOrder);
+	}
+
 	function toggleDesc() {
+		if (sort === 'custom') return;
 		desc = !desc;
 		applySort();
 	}
@@ -429,6 +638,8 @@
 		const saved = readSort(pid);
 		sort = saved?.sort ?? 'default';
 		desc = saved?.desc ?? false;
+		customOrder = readCustomOrder(pid);
+		draggingKey = '';
 		const key = cacheKey(pid, saved && sort, desc);
 		loadedKey = key;
 		const hit = getCached<PlaylistPage>(key);
@@ -578,7 +789,7 @@
 		loadingMore = true;
 		moreError = false;
 		try {
-			const more = await api.getPlaylistMore(token);
+			const more = await api.getPlaylistMore(token, id);
 			if (pl?.continuation !== token) return; // stale (navigated or mutated mid-flight)
 			pl = {
 				...pl,
@@ -605,12 +816,13 @@
 		rowWindow(sc.scrollTop - sc.offsetPx, sc.viewportPx, shown.length, sc.rowPx)
 	);
 
-	// One page per approach to the bottom: the observer only fires when the sentinel *enters* view,
-	// so an appended page that pushes it back out is required before the next fetch. rootMargin
-	// starts the fetch early enough that the rows are usually there by the time you reach them.
+	// Observe against this nested scroller and only fetch when the sentinel actually reaches it.
+	// A viewport-root margin used to fetch while the user was still scrolling toward the bottom,
+	// continually moving the end of the list and making the last row feel like it bounced away.
 	function sentinel(node: HTMLElement) {
 		const io = new IntersectionObserver(([e]) => e.isIntersecting && loadMore(), {
-			rootMargin: '600px 0px'
+			root: node.closest<HTMLElement>('[data-playlist-scroller]'),
+			rootMargin: '0px'
 		});
 		io.observe(node);
 		return () => io.disconnect();
@@ -914,7 +1126,7 @@
 	}
 </script>
 
-<div class="flex h-full flex-col">
+<div class="flex h-full min-h-0 flex-col overflow-hidden">
 	{#if loading}
 		<div class="flex items-end gap-6 border-b p-6">
 			<Skeleton class="h-40 w-40 shrink-0 rounded-xl" />
@@ -935,7 +1147,13 @@
 	{:else if pl}
 		<!-- One scroller for the whole page: the header scrolls away above the rows, same as the
 		     album page. -->
-		<div class="content-in min-h-0 flex-1 overflow-y-auto" {@attach sc.attach}>
+		<div
+			class="content-in min-h-0 flex-1 overflow-y-auto overscroll-y-none"
+			data-playlist-scroller
+			bind:this={playlistScroller}
+			{@attach sc.attach}
+			ondragover={onPlaylistDragOver}
+		>
 			<div class="relative flex min-h-[38vh] shrink-0 items-end gap-6 overflow-hidden border-b p-6">
 				{#if backdrop}
 					<img
@@ -1047,16 +1265,18 @@
 								<HugeiconsIcon icon={Sorting01Icon} class="h-4 w-4" />
 								{sortLabel}
 							</Button>
-							<Button
-								variant="ghost"
-								size="icon"
-								class={desc ? '' : 'text-muted-foreground'}
-								aria-label={t('sort.direction', { dir: desc ? t('sort.descending') : t('sort.ascending') })}
-								onclick={toggleDesc}
-								disabled={!pl.items.length}
-							>
-								<HugeiconsIcon icon={ArrowUpDownIcon} class="h-4 w-4" />
-							</Button>
+							{#if sort !== 'custom'}
+								<Button
+									variant="ghost"
+									size="icon"
+									class={desc ? '' : 'text-muted-foreground'}
+									aria-label={t('sort.direction', { dir: desc ? t('sort.descending') : t('sort.ascending') })}
+									onclick={toggleDesc}
+									disabled={!pl.items.length}
+								>
+									<HugeiconsIcon icon={ArrowUpDownIcon} class="h-4 w-4" />
+								</Button>
+							{/if}
 						</div>
 					</div>
 				</div>
@@ -1082,18 +1302,35 @@
 					     length of the whole playlist even though only ~30 rows exist.
 					     data-rows: what the scroller measures row 0's position from. -->
 					<div data-rows style="padding-top:{win.padTop}px;padding-bottom:{win.padBottom}px">
-						{#each shown.slice(win.start, win.end) as item, i (JSON.stringify([item.video_id, win.start + i]))}
+						{#each shown.slice(win.start, win.end) as item, i (playlistRowKey(item))}
 							{@const n = win.start + i}
-							<!-- data-row: what the scroller measures a row's real height from. -->
-							<div data-row>
+							{@const rowKey = playlistRowKey(item)}
+							<!-- data-row: what the scroller measures a row's real height from. `relative!` outside a
+							     drag (same fix as QueueList, #380): for each row the window drops, flip's `fix()` sets
+							     `position: absolute` and forces a layout before the padding grows to stand in for it.
+							     At the end of the list that layout is a row short, so Chromium clamps scrollTop and
+							     the list snaps back (the bounce). The important beats fix()'s inline style, so rows
+							     stay in flow until they go. Flip only has work to do while a row is being dragged. -->
+							<div
+								data-row
+								draggable={reorderable}
+								class="{draggingKey ? '' : 'relative!'} {draggingKey === rowKey ? 'opacity-50' : ''}"
+								animate:flip={{ duration: draggingKey ? 180 : 0 }}
+								ondragstart={(event) => startTrackDrag(event, rowKey)}
+								ondragover={(event) => moveTrackDrag(event, rowKey)}
+								ondrop={(event) => event.preventDefault()}
+								ondragend={endTrackDrag}
+							>
 								<TrackRow
 									song={item}
+									metadataPlaylistId={id}
 									{selection}
 									selectionKey={selection.visibleKeys[n]}
 									index={n}
 									showPlayCount
+									reorderable={reorderable}
 									active={item.video_id === nowId}
-									onplay={() => playAll(n)}
+									onplay={() => playPlaylistRow(n)}
 									onAdd={() => openAddToPlaylist(item)}
 									onRemove={isLiked || item.set_video_id
 										? () => removeTrack(item)
@@ -1175,6 +1412,13 @@
 	</div>
 {/if}
 
+<style>
+	:global(body.playlist-track-dragging),
+	:global(body.playlist-track-dragging *) {
+		cursor: grabbing !important;
+	}
+</style>
+
 {#if menuOpen}
 	<button
 		class="fixed inset-0 z-40 cursor-default"
@@ -1246,6 +1490,13 @@
 				<HugeiconsIcon icon={Share08Icon} class="h-4 w-4" /> {t('player.share')}
 			</button>
 		{/if}
+		<button
+			class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+			onclick={() => run(showDownloadDialog)}
+			disabled={!pl?.items.length}
+		>
+			<span class="w-4 text-center" aria-hidden="true">↓</span> {t('player.download_playlist')}
+		</button>
 		{#if savable}
 			<button
 				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
@@ -1302,6 +1553,18 @@
 		cover={pl?.cover}
 		fallback={pl?.thumbnail}
 		onchange={applyEdit}
+	/>
+{/if}
+
+{#if downloadMounted}
+	<DownloadDialog
+		bind:open={downloadOpen}
+		onClose={finishDownloadDialogClose}
+		songs={pl?.items ?? []}
+		playlistName={pl?.title ?? 'Playlist'}
+		continuation={pl?.continuation}
+		playlistId={id}
+		archive
 	/>
 {/if}
 

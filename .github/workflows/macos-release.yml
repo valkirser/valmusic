@@ -208,6 +208,15 @@ jobs:
       # createUpdaterArtifacts is turned off for the same reason. Left on, the bundler tars the
       # unfixed .app and then fails the build asking for the signing key, which is deliberately not
       # in scope here: the tarball that ships is made and signed further down, after dylibbundler.
+      - name: Prepare bundled FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
+      - name: Stage FFmpeg for the app bundle
+        run: |
+          set -euo pipefail
+          mkdir -p src-tauri/resources/ffmpeg
+          install -m 0755 "$(command -v ffmpeg)" src-tauri/resources/ffmpeg/ffmpeg
+
       - name: Build the app bundle
         run: |
           set -euo pipefail

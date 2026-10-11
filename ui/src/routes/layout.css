@@ -1085,3 +1085,9 @@ input[type='range'].range:active::-webkit-slider-thumb {
 		scroll-behavior: auto !important;
 	}
 }
+
+/* WebView2 can composite the transparent pixels outside the rounded root as black. The Windows
+   window manager already rounds the window itself, so let the app surface reach the full bounds. */
+html.chromium .app-window-shell {
+	border-radius: 0;
+}

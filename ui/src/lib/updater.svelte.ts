@@ -7,11 +7,11 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { toast } from './player.svelte';
 import { t } from './i18n.svelte';
 import { friendlyNetError } from './neterr';
-import { canSelfUpdate, checkBetaUpdate, getSettings, openExternal, releaseNotes } from './api';
+import { canSelfUpdate, getSettings, openExternal } from './api';
 import { isNewer, isPrerelease } from './version';
 import { getVersion } from '@tauri-apps/api/app';
 
-const RELEASES_URL = 'https://github.com/SimoHypers/limusic/releases/latest';
+const RELEASES_URL = 'https://github.com/valkirser/valmusic/releases/latest';
 
 /** How often the quiet check repeats while the app stays open. */
 export const QUIET_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -29,63 +29,29 @@ export const updateState = $state({
 let pending: Update | null = null;
 
 async function look(): Promise<boolean> {
-	let u: Update | null;
-	const beta = (await getSettings()).update_channel === 'beta';
 	const current = await getVersion();
-	try {
-		if (beta) {
-			// The beta pointer, through the same plugin: see `check_beta_update` in commands.rs.
-			const meta = await checkBetaUpdate();
-			u = meta && new Update(meta);
-		} else {
-			// `allowDowngrades` is the rollback lever. Without it the plugin compares
-			// `remote > current`, so once a broken release installs itself there is no way back:
-			// marking an older release Latest moves nobody, and the only fix is shipping another
-			// release on top of the broken one. With it the plugin's own comparator becomes
-			// `remote != current` (tauri-plugin-updater 2.10.1, `commands.rs`), so whatever release is
-			// marked Latest is what every client converges on, newer or older. A rollback is
-			// `gh release edit <good-tag> --latest`, plus demoting the pulled release to a prerelease
-			// for the fallback below.
-			//
-			// It has to be armed in the release that might need rescuing, not the rescue: a build
-			// without it never takes a downgrade, so this only protects releases from 1.0.0 on.
-			//
-			// What makes it safe is that nothing moves until the owner moves Latest, and the release
-			// workflows only flip Latest once all three platforms are in its latest.json, so Latest is
-			// always a complete, signed release. Once a client is on it, `remote != current` is false
-			// and it stays put: no loop.
-			//
-			// Not on a prerelease build. That is someone who left the beta channel while on an RC, and
-			// they stay on it until stable passes it (1.1.0 > 1.1.0-rc.2 in the plugin's semver)
-			// instead of being offered a downgrade to the last release. A dev build after the version
-			// bump is the other build ahead of Latest; it gets the rollback banner, which only costs a
-			// banner in dev.
-			u = await check({ allowDowngrades: !isPrerelease(current) });
-		}
-	} catch (e) {
-		// The plugin resolves this platform's entry in latest.json BEFORE it compares versions, so a
-		// release whose manifest is missing the entry (a CI leg failed, or is still running) makes
-		// every check throw. The quiet check swallows that, which silently leaves the whole platform
-		// with no update prompt until some later release fixes the manifest. v0.6.6 shipped without
-		// `darwin-aarch64` and did exactly that to every Mac. So ask the releases API instead: it
-		// doesn't read the manifest. Nothing signed is reachable for us to install, so the banner
-		// can only offer the download page. If that call fails too (offline, rate-limited), its
-		// error propagates and the check reports as failed, which it did.
-		//
-		// Any difference counts, like the main path above: `isNewer` here would refuse a rollback on
-		// exactly the platforms whose manifest is broken. Note the releases API lists by creation
-		// date, not by the Latest flag, so this only follows a rollback when the pulled release is
-		// also demoted to a prerelease (which `release_notes` filters out). It lists no prereleases
-		// either, so an RC build only hears about a release that has passed it, the same rule as
-		// `allowDowngrades` above.
-		console.error('update manifest unusable, falling back to the releases API', e);
-		const latest = (await releaseNotes())[0]?.version;
-		if (!latest || latest === current) return false;
-		if (isPrerelease(current) && !isNewer(latest, current)) return false;
-		updateState.canInstall = false;
-		updateState.available = { version: latest, rollback: isNewer(current, latest) };
-		return true;
-	}
+	// `allowDowngrades` is the rollback lever. Without it the plugin compares
+	// `remote > current`, so once a broken release installs itself there is no way back:
+	// marking an older release Latest moves nobody, and the only fix is shipping another
+	// release on top of the broken one. With it the plugin's own comparator becomes
+	// `remote != current` (tauri-plugin-updater 2.10.1, `commands.rs`), so whatever release is
+	// marked Latest is what every client converges on, newer or older. A rollback is
+	// `gh release edit <good-tag> --latest`, plus demoting the pulled release to a prerelease.
+	//
+	// It has to be armed in the release that might need rescuing, not the rescue: a build
+	// without it never takes a downgrade, so this only protects releases from 1.0.0 on.
+	//
+	// What makes it safe is that nothing moves until the owner moves Latest, and the release
+	// workflows only flip Latest once all three platforms are in its latest.json, so Latest is
+	// always a complete, signed release. Once a client is on it, `remote != current` is false
+	// and it stays put: no loop.
+	//
+	// Not on a prerelease build. That is someone who left the beta channel while on an RC, and
+	// they stay on it until stable passes it (1.1.0 > 1.1.0-rc.2 in the plugin's semver)
+	// instead of being offered a downgrade to the last release. A dev build after the version
+	// bump is the other build ahead of Latest; it gets the rollback banner, which only costs a
+	// banner in dev.
+	const u = await check({ allowDowngrades: !isPrerelease(current) });
 	if (u) {
 		pending = u;
 		// Before `available`, so the banner never renders with the wrong button for a frame. On the

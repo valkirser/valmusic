@@ -1,4 +1,4 @@
-//! Limusic Tauri app. Wires transport + player + db + orchestrator behind the command boundary.
+//! ValMusic Tauri app. Wires transport + player + db + orchestrator behind the command boundary.
 
 mod appicon;
 mod audioproxy;
@@ -258,7 +258,7 @@ fn fatal(what: &str, detail: &str) -> ! {
 static AUTOSTARTED: AtomicBool = AtomicBool::new(false);
 const RESTARTED_ENV: &str = "LIMUSIC_RESTARTED";
 
-/// What a cold launch was given, so `limusic-app 'https://music.youtube.com/watch?v=…'` opens the
+/// What a cold launch was given, so `valmusic-app 'https://music.youtube.com/watch?v=…'` opens the
 /// link once the SPA has mounted (#348). Taken once by `take_launch_args`. A launch while we are
 /// already running reaches the single-instance callback instead, which emits `open-link`. Raw
 /// strings either way: `parseYtLink` in the UI decides what is a link, so there is one parser.
@@ -354,11 +354,11 @@ pub fn run() {
     // (Windows) pointing somewhere else, or the second copy opens the first one's SQLite file and
     // the two fight over it, which is what the guard exists to prevent:
     //
-    //     LIMUSIC_MULTI=1 XDG_DATA_HOME=/tmp/limusic-b ./target/debug/limusic-app
+    //     LIMUSIC_MULTI=1 XDG_DATA_HOME=/tmp/limusic-b ./target/debug/valmusic-app
     if std::env::var_os("LIMUSIC_MULTI").is_none() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             tray::show_main(app);
-            // `limusic-app <link>` against this instance (#348). argv[0] leads on every platform.
+            // `valmusic-app <link>` against this instance (#348). argv[0] leads on every platform.
             if args.len() > 1 {
                 let _ = app.emit_to("main", "open-link", &args[1..]);
             }
@@ -425,7 +425,7 @@ pub fn run() {
             let (db, quarantined) = match Db::open_or_quarantine(&data_dir.join("limusic.sqlite")) {
                 Ok(v) => v,
                 Err(e) => fatal(
-                    "Limusic could not open or create its database",
+                    "ValMusic could not open or create its database",
                     &format!("{}: {e}", data_dir.display()),
                 ),
             };
@@ -477,7 +477,7 @@ pub fn run() {
             let session = Session { locale: Locale::default(), visitor_data, data_sync_id, cookie };
             let it = match InnerTube::new(session, proxy.as_deref()) {
                 Ok(it) => it,
-                Err(e) => fatal("Limusic could not start its network client", &e.to_string()),
+                Err(e) => fatal("ValMusic could not start its network client", &e.to_string()),
             };
             // Shelf titles, mood chips and playlist subtitles are YouTube's text, so the UI's
             // language has to go out with the request (#274). Persisted rather than pushed from the
@@ -497,7 +497,7 @@ pub fn run() {
             let mut player = match Player::new(&cache_dir.to_string_lossy()) {
                 Ok(p) => p,
                 Err(e) => fatal(
-                    "Limusic could not load libmpv, which it uses to play audio",
+                    "ValMusic could not load libmpv, which it uses to play audio",
                     &format!(
                         "{e}. On Linux, install your distribution's mpv library \
                          (Fedora: mpv-libs, Debian/Ubuntu: libmpv2)."
@@ -520,7 +520,7 @@ pub fn run() {
             let events = match player.take_events() {
                 Some(ev) => ev,
                 None => fatal(
-                    "Limusic could not start its audio event loop",
+                    "ValMusic could not start its audio event loop",
                     "the player's event channel was already taken, which is a bug",
                 ),
             };
@@ -842,6 +842,8 @@ pub fn run() {
             commands::set_volume,
             commands::set_playback_params,
             commands::get_queue,
+            commands::set_song_metadata,
+            commands::download_songs,
             commands::get_playback,
             commands::video_stream,
             commands::forget_video_stream,
@@ -947,7 +949,6 @@ pub fn run() {
             commands::theater_fullscreen,
             commands::release_notes,
             commands::can_self_update,
-            commands::check_beta_update,
             commands::open_external,
             commands::quit_app,
             commands::diagnostics,

@@ -1264,7 +1264,8 @@ export function openNewPlaylist(songs: SongItem[] = []) {
 async function addToOne(
 	target: BrowseItem,
 	songs: SongItem[],
-	allowDuplicates: boolean
+	allowDuplicates: boolean,
+	onProgress?: (done: number, total: number, current: string) => void
 ): Promise<{ added: SongItem[]; dupes: number; failure: string | null; aborted: boolean }> {
 	const local = api.isLocalPlaylist(target.id);
 	const epoch = auth.epoch;
@@ -1278,17 +1279,21 @@ async function addToOne(
 		}
 		added = songs.filter((_, i) => went[i]);
 		confirmed = songs;
+		for (let i = 0; i < songs.length; i++) onProgress?.(i + 1, songs.length, songs[i].title);
 	} else {
 		// YouTube refuses a track the playlist already holds, so only the ones it accepted get
 		// counted and drawn: an optimistic row for a refused add is a row that can never be
 		// removed (no setVideoId behind it) until the app restarts.
-		for (const song of songs) {
+		for (let i = 0; i < songs.length; i++) {
+			const song = songs[i];
 			if (epoch !== auth.epoch) break;
 			try {
 				if (await api.addToPlaylist(target.id, song.video_id, allowDuplicates)) added.push(song);
 				confirmed.push(song);
+				onProgress?.(i + 1, songs.length, song.title);
 			} catch (e) {
 				failure = String(e);
+				onProgress?.(i + 1, songs.length, song.title);
 				break;
 			}
 		}
@@ -1318,7 +1323,11 @@ async function addToOne(
  * A playlist on this machine takes the lot in one write, local files included. A YouTube one is a
  * request per song, sequential because a bulk selection can be thousands of rows.
  */
-export async function addSongsToPlaylist(target: BrowseItem, songs: SongItem[]): Promise<void> {
+export async function addSongsToPlaylist(
+	target: BrowseItem,
+	songs: SongItem[],
+	onProgress?: (done: number, total: number, current: string) => void
+): Promise<void> {
 	if (ui.addPending || !songs.length) return;
 	const local = api.isLocalPlaylist(target.id);
 	if (!local && songs.some((s) => api.isLocalId(s.video_id))) {
@@ -1328,7 +1337,7 @@ export async function addSongsToPlaylist(target: BrowseItem, songs: SongItem[]):
 	ui.addPending = true;
 	const epoch = auth.epoch;
 	try {
-		const res = await addToOne(target, songs, false);
+		const res = await addToOne(target, songs, false, onProgress);
 		if (epoch !== auth.epoch || res.aborted) {
 			toast.error(t('selection.account_changed'));
 			return;
@@ -1499,6 +1508,9 @@ export function initApp(mini = false): () => void {
 			// Not in the mini player, which has no player view to show it in.
 			if (!mini && prefs.musicVideos && !prefs.nativeVideo && n.isVideo) videoUrlFor(n.videoId);
 		}),
+		api.onNowPlayingMetadataUpdated((n) => {
+			if (playback.now?.videoId === n.videoId) playback.now = n;
+		}),
 		// YouTube's own answer for a track whose row never stated one (issue #93). Into the
 		// override map as well as the player bar: the same song is on screen as a list row too,
 		// and `ratingOf` reads that map for every row that is not the playing one.
@@ -1509,6 +1521,22 @@ export function initApp(mini = false): () => void {
 			if (playback.now?.videoId === videoId) playback.rating = rating;
 		}),
 		api.onQueueChanged((q) => (playback.queue = q)),
+		api.onSongMetadataUpdated((update) => {
+			if (playback.queue.sourceId !== update.playlistId) return;
+			playback.queue = {
+				...playback.queue,
+				items: playback.queue.items.map((item) => item.video_id === update.videoId
+					? {
+						...item,
+						title: update.title,
+						artists: update.artists,
+						thumbnail: update.thumbnail || undefined,
+						artist_id: update.artistId ?? undefined,
+						artist_runs: update.artistRuns
+					}
+					: item)
+			};
+		}),
 		// The items did not change, so keep the array we already hold and patch the rest. Splice
 		// the playing row back in: `start_current` backfills its duration and artists after the
 		// stream resolves, and that repair rides on this event rather than a whole new queue.

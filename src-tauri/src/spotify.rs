@@ -458,7 +458,7 @@ pub async fn read_link(kind: LinkKind, id: &str) -> Result<SourceList, String> {
     Ok(list)
 }
 
-/// A track link, for "Spotify links open in Limusic".
+/// A track link, for "Spotify links open in ValMusic".
 pub async fn read_track(id: &str) -> Result<SourceTrack, String> {
     let Embed { entity, .. } = embed(LinkKind::Track, id).await?;
     embed_track(&entity).ok_or_else(|| "spotify_changed".into())
@@ -775,7 +775,7 @@ mod tests {
         include_str!("../tests/fixtures/spotify/pathfinder_playlist_page.json");
 
     /// Live, against Spotify only (no YouTube): a 150-track editorial playlist comes back whole,
-    /// with albums, which only pathfinder knows. `cargo test -p limusic-app --lib -- --ignored`.
+    /// with albums, which only pathfinder knows. `cargo test -p valmusic-app --lib -- --ignored`.
     #[tokio::test]
     #[ignore]
     async fn reads_past_the_embed_limit() {

@@ -22,10 +22,11 @@
 		UserBlock01Icon
 	} from '@hugeicons/core-free-icons';
 	import * as api from '$lib/api';
-	import type { BrowseItem } from '$lib/api';
+	import type { BrowseItem, SongItem } from '$lib/api';
 	import { addItemToPlaylist, enqueueItem, playItem } from '$lib/browse';
 	import { anchorMenu, ctxHost, fitMenu, NO_ANCHOR, toBody } from '$lib/menu';
 	import { t } from '$lib/i18n.svelte';
+	import DownloadDialog from './DownloadDialog.svelte';
 	import {
 		addPick,
 		addToLibrary,
@@ -153,6 +154,41 @@
 
 	let menuOpen = $state(false);
 	let anchor = $state(NO_ANCHOR);
+	let downloadOpen = $state(false);
+	let downloadMounted = $state(false);
+	let downloadCloseTimer: ReturnType<typeof setTimeout> | undefined;
+	let downloadBusy = $state(false);
+	let downloadSongs = $state<SongItem[]>([]);
+	let downloadContinuation = $state<string | undefined>();
+	let downloadTitle = $state('');
+
+	function showDownloadDialog() {
+		if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+		downloadMounted = true;
+		downloadOpen = true;
+	}
+	function finishDownloadDialogClose() {
+		downloadOpen = false;
+		if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+		downloadCloseTimer = setTimeout(() => (downloadMounted = false), 180);
+	}
+
+	async function preparePlaylistDownload() {
+		if (downloadBusy) return;
+		downloadBusy = true;
+		menuOpen = false;
+		try {
+			const page = await api.getPlaylist(item.id);
+			downloadSongs = page.items;
+			downloadContinuation = page.continuation;
+			downloadTitle = page.title ?? item.title;
+			showDownloadDialog();
+		} catch (e) {
+			toast.error(String(e));
+		} finally {
+			downloadBusy = false;
+		}
+	}
 
 	// Click on the ⋯ opens under the button; right-click on the host card or row opens at the pointer.
 	function openMenu(e: MouseEvent) {
@@ -310,6 +346,18 @@
 				<HugeiconsIcon icon={Share08Icon} class="h-4 w-4" /> {t("player.share")}
 			</button>
 		{/if}
+		{#if item.kind === 'playlist'}
+			<button
+				class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10 disabled:opacity-50"
+				disabled={downloadBusy}
+				onclick={(e) => {
+					e.stopPropagation();
+					preparePlaylistDownload();
+				}}
+			>
+				<span class="w-4 text-center" aria-hidden="true">↓</span> {t('player.download_playlist')}
+			</button>
+		{/if}
 		<!-- One row for library membership: put it in, take the local copy back out, or just say it
 		     is already there (YouTube's own copy is unsaved from the item's page, which knows which
 		     write to send). Local folders and On Repeat have no library to be in. -->
@@ -366,4 +414,16 @@
 			</button>
 		{/if}
 	</div>
+{/if}
+
+{#if downloadMounted}
+	<DownloadDialog
+		bind:open={downloadOpen}
+		onClose={finishDownloadDialogClose}
+		songs={downloadSongs}
+		archive
+		playlistName={downloadTitle}
+		playlistId={item.id}
+		continuation={downloadContinuation}
+	/>
 {/if}
