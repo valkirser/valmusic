@@ -42,10 +42,8 @@ fn stage_ffmpeg() {
         return;
     }
 
-    let source = env::var_os("FFMPEG_PATH")
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-        .or_else(|| {
+    let source =
+        env::var_os("FFMPEG_PATH").map(PathBuf::from).filter(|path| path.is_file()).or_else(|| {
             env::split_paths(&env::var_os("PATH")?).find_map(|directory| {
                 let candidate = directory.join(executable);
                 candidate.is_file().then_some(candidate)

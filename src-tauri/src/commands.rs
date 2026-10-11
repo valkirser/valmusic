@@ -261,7 +261,10 @@ pub async fn set_song_metadata(
             } else {
                 run.text.trim().to_owned()
             };
-            run.id = run.id.map(|id| id.trim().to_owned()).filter(|id| id.starts_with("UC") && id.len() <= 128);
+            run.id = run
+                .id
+                .map(|id| id.trim().to_owned())
+                .filter(|id| id.starts_with("UC") && id.len() <= 128);
             run
         })
         .filter(|run| !run.text.is_empty())
@@ -321,7 +324,8 @@ pub async fn download_songs(
         return Err("Choose a destination folder.".into());
     }
     let target = Path::new(&folder);
-    std::fs::create_dir_all(target).map_err(|e| format!("Could not open the download folder: {e}"))?;
+    std::fs::create_dir_all(target)
+        .map_err(|e| format!("Could not open the download folder: {e}"))?;
     let target = target.canonicalize().map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -484,9 +488,16 @@ pub async fn download_songs(
 }
 
 fn safe_download_name(name: &str) -> String {
-    let safe: String = name.chars().map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c }).collect();
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c })
+        .collect();
     let safe = safe.trim().trim_matches('.');
-    if safe.is_empty() { "Untitled".into() } else { safe.chars().take(160).collect() }
+    if safe.is_empty() {
+        "Untitled".into()
+    } else {
+        safe.chars().take(160).collect()
+    }
 }
 
 fn unique_download_path(folder: &Path, name: &str) -> std::path::PathBuf {
@@ -523,19 +534,24 @@ fn apply_song_metadata(db: &crate::db::Db, playlist_id: &str, song: &mut SongIte
         song.artists = artists.to_owned();
         song.artist_runs.clear();
     }
-    if let Some(thumbnail) = value.get("thumbnail").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(thumbnail) =
+        value.get("thumbnail").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    {
         song.thumbnail = Some(thumbnail.to_owned());
     }
     if let Some(runs) = value.get("artistRuns").and_then(|v| v.as_array()) {
-        song.artist_runs = serde_json::from_value(serde_json::Value::Array(runs.clone())).unwrap_or_default();
+        song.artist_runs =
+            serde_json::from_value(serde_json::Value::Array(runs.clone())).unwrap_or_default();
         song.artist_id = song.artist_runs.iter().find_map(|run| run.id.clone());
     } else if let Some(ids) = value.get("artistIds").and_then(|v| v.as_array()) {
-        song.artist_id = ids.first().and_then(|id| id.as_str()).filter(|id| !id.is_empty()).map(str::to_owned);
+        song.artist_id =
+            ids.first().and_then(|id| id.as_str()).filter(|id| !id.is_empty()).map(str::to_owned);
         let names: Vec<&str> = song.artists.split(", ").filter(|name| !name.is_empty()).collect();
         let mut artist_runs = Vec::new();
         for (index, (name, id)) in names.into_iter().zip(ids.iter()).enumerate() {
             if index > 0 {
-                artist_runs.push(innertube::models::metadata::ArtistRun { text: ", ".into(), id: None });
+                artist_runs
+                    .push(innertube::models::metadata::ArtistRun { text: ", ".into(), id: None });
             }
             let id = id.as_str().filter(|id| id.starts_with("UC")).map(str::to_owned);
             artist_runs.push(innertube::models::metadata::ArtistRun { text: name.into(), id });
@@ -1314,7 +1330,8 @@ pub async fn get_playlist_more(
     playlist_id: Option<String>,
 ) -> Result<PlaylistContinuation, String> {
     let client = metadata_client(&state)?;
-    let mut page = state.it.playlist_continuation(client, &token).await.map_err(|e| e.to_string())?;
+    let mut page =
+        state.it.playlist_continuation(client, &token).await.map_err(|e| e.to_string())?;
     if let Some(playlist_id) = playlist_id.as_deref() {
         for song in &mut page.items {
             apply_song_metadata(&state.db, playlist_id, song);

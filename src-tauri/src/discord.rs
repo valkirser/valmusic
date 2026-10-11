@@ -449,7 +449,9 @@ impl Presence {
                 self.duration = 0.0; // length unknown until mpv reports it (grace waits for it)
             }
             Msg::Metadata(t) => {
-                if let Some(current) = self.track.as_mut().filter(|current| current.video_id == t.video_id) {
+                if let Some(current) =
+                    self.track.as_mut().filter(|current| current.video_id == t.video_id)
+                {
                     current.title = t.title;
                     current.artists = t.artists;
                     current.artist_id = t.artist_id;

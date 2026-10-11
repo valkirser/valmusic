@@ -537,7 +537,11 @@ impl Orchestrator {
                 video_id: video_id.to_owned(),
                 stream_url: c.url,
                 itag: c.itag as i64,
-                mime_type: if c.itag == 140 { "audio/mp4".into() } else { "audio/webm; codecs=\"opus\"".into() },
+                mime_type: if c.itag == 140 {
+                    "audio/mp4".into()
+                } else {
+                    "audio/webm; codecs=\"opus\"".into()
+                },
                 headers: std::collections::HashMap::new(),
                 expires_in_seconds: c.expires_in_seconds as i64,
                 loudness_db: c.loudness_db.map(|f| f as f64),

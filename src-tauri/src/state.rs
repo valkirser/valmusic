@@ -1198,7 +1198,11 @@ impl AppState {
                 video_id: video_id.to_owned(),
                 stream_url: c.url,
                 itag: c.itag,
-                mime_type: if c.itag == 140 { "audio/mp4".into() } else { "audio/webm; codecs=\"opus\"".into() },
+                mime_type: if c.itag == 140 {
+                    "audio/mp4".into()
+                } else {
+                    "audio/webm; codecs=\"opus\"".into()
+                },
                 headers,
                 expires_in_seconds: c.expires_at - now,
                 loudness_db: c.loudness_db,
@@ -2320,8 +2324,7 @@ impl AppState {
             item.artist_id = artist_runs.iter().find_map(|run| run.id.clone());
             let item = item.clone();
             let stream_client = q.current_client.as_deref().unwrap_or("current").to_owned();
-            self.last_queue_fingerprint
-                .store(queue_fingerprint(&q.items), Ordering::Relaxed);
+            self.last_queue_fingerprint.store(queue_fingerprint(&q.items), Ordering::Relaxed);
             (
                 item,
                 stream_client,
@@ -2337,14 +2340,17 @@ impl AppState {
             .app
             .emit("now-playing-metadata-updated", Self::now_playing_json(&item, &stream_client));
         // The queue list did change, but only its current row. Keep this update small for long queues.
-        let _ = self.app.emit("queue-index", serde_json::json!({
-            "currentIndex": current_index,
-            "shuffle": shuffle,
-            "repeat": repeat,
-            "sourceName": source_name,
-            "sourceId": source_id,
-            "current": item,
-        }));
+        let _ = self.app.emit(
+            "queue-index",
+            serde_json::json!({
+                "currentIndex": current_index,
+                "shuffle": shuffle,
+                "repeat": repeat,
+                "sourceName": source_name,
+                "sourceId": source_id,
+                "current": item,
+            }),
+        );
         if let Some(media) = &self.media {
             let cover = item.thumbnail.as_deref().map(|url| {
                 if url.contains("://") {
