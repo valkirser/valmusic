@@ -1,0 +1,128 @@
+name: Windows installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  MPV_DEV_URL: https://github.com/SimoHypers/limusic/releases/download/deps/libmpv-2-x86_64-20260610-git-304426c.7z
+  MPV_DEV_SHA256: af708edcdf6ed12ac7b2bb31b4cbeba0bf7d4eef345a715ef5de782c0ddd6671
+  MPV_DIR: ${{ github.workspace }}\.libmpv
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Check tag matches app version
+        shell: bash
+        run: |
+          VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
+          CARGO_VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match app version $VERSION"
+            exit 1
+          fi
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Cargo.toml version $CARGO_VERSION does not match app version $VERSION"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        shell: bash
+        run: cd ui && pnpm install --frozen-lockfile
+
+      - name: Set up Rust
+        shell: bash
+        run: rustup default stable-msvc
+
+      - name: Configure Rust linker
+        shell: bash
+        run: echo "RUSTFLAGS=-L native=${{ github.workspace }}\.libmpv" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+
+      - name: Install Tauri CLI
+        shell: bash
+        run: npm install -g "@tauri-apps/cli@2.11.5"
+
+      - name: Prepare libmpv for MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path $env:MPV_DIR | Out-Null
+          curl.exe -fsSL -o "$env:MPV_DIR\mpv-dev.7z" $env:MPV_DEV_URL
+          if ((Get-FileHash "$env:MPV_DIR\mpv-dev.7z" -Algorithm SHA256).Hash -ne $env:MPV_DEV_SHA256) {
+            throw 'The downloaded libmpv archive failed its SHA-256 check.'
+          }
+          7z x "$env:MPV_DIR\mpv-dev.7z" "-o$env:MPV_DIR" -y | Out-Null
+          if (-not (Test-Path "$env:MPV_DIR\libmpv-2.dll")) { throw 'libmpv-2.dll was not found in the archive.' }
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          Set-Location $env:MPV_DIR
+          $names = & dumpbin /exports libmpv-2.dll |
+            Select-String -Pattern '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\w+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if ($names.Count -lt 50) { throw "Parsed only $($names.Count) exports from libmpv-2.dll." }
+          @('EXPORTS') + ($names | ForEach-Object { "    $_" }) | Set-Content -Path mpv.def -Encoding ascii
+          & lib /def:mpv.def /name:libmpv-2.dll /out:mpv.lib /machine:x64
+          if (-not (Test-Path "$env:MPV_DIR\mpv.lib")) { throw 'MSVC did not create mpv.lib.' }
+          Copy-Item "$env:MPV_DIR\libmpv-2.dll" "$env:GITHUB_WORKSPACE\src-tauri\libmpv-2.dll" -Force
+
+      - name: Install FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
+      - name: Stage FFmpeg
+        shell: bash
+        run: |
+          mkdir -p src-tauri/resources/ffmpeg
+          cp "$(command -v ffmpeg)" src-tauri/resources/ffmpeg/ffmpeg.exe
+
+      - name: Build installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd ui && pnpm build)
+          tauri build --bundles nsis,msi \
+            --config '{"build":{"beforeBuildCommand":""},"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Create release and attach installers
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          EXE="$(find target/release/bundle/nsis -maxdepth 1 -type f -name '*-setup.exe' -print -quit)"
+          MSI="$(find target/release/bundle/msi -maxdepth 1 -type f -name '*.msi' -print -quit)"
+          [ -n "$EXE" ] || { echo '::error::NSIS setup installer was not produced'; exit 1; }
+          [ -n "$MSI" ] || { echo '::error::MSI installer was not produced'; exit 1; }
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "ValMusic $VERSION" --generate-notes
+          fi
+          gh release upload "$TAG" "$EXE" "$MSI" --repo "$GITHUB_REPOSITORY" --clobber
